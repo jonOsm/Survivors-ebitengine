@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand"
 	"os" // For os.Exit
+	"sort" // For sorting enemies by distance
 	"strconv"
 	"strings" // For text wrapping
 	"time"
@@ -71,6 +72,8 @@ var availablePowerUps = []PowerUpDefinition{
 	{"PUP004", "Larger Attack Radius", "Pulse attack maximum radius increased."},
 	{"PUP005", "Extra Health", "Increases Max Health by a small amount."},
 	{"PUP006", "Magic Missile", "Fires a homing missile every 2s that weaves and deals 2 damage."},
+	{"PUP007", "Twin Barrage", "Magic Missile fires an additional projectile."},
+	{"PUP008", "Phantom Edge", "Magic Missile pierces 1 additional enemy."},
 }
 
 // MagicMissile represents a homing, weaving projectile.
@@ -83,6 +86,9 @@ type MagicMissile struct {
 	timeAlive      float64 // For weaving pattern and lifetime
 	Image          *ebiten.Image
 	ToRemove       bool
+	MaxPierces     int // Max number of enemies this missile can pierce
+	PiercesMade    int // How many enemies this missile has pierced so far
+	hitTargets     map[*Enemy]bool // Tracks enemies already hit by this specific missile instance to avoid re-hitting in a pierce chain
 }
 
 // Game implements ebiten.Game interface.
@@ -146,8 +152,10 @@ type Player struct {
 	XPMultiplier     float64 // Multiplier for XP gained
 
 	// Magic Missile specific
-	HasMagicMissile      bool
-	magicMissileFireTimer float64 // Cooldown timer for firing missiles
+	HasMagicMissile         bool
+	magicMissileFireTimer   float64 // Cooldown timer for firing missiles
+	MagicMissileCount       int     // Number of missiles to fire at once
+	MagicMissilePiercing    int     // How many additional targets missiles can pierce
 }
 
 // Enemy represents an enemy character.
@@ -255,6 +263,8 @@ func NewGame() *Game {
 			XPMultiplier:    1.0,
 			HasMagicMissile: false,
 			magicMissileFireTimer: 0,
+			MagicMissileCount:    0, // Will be set to 1 when PUP006 is acquired
+			MagicMissilePiercing: 0,
 		},
 		enemies:        []*Enemy{},
 		pulseAttacks:   []*PulseAttack{},
@@ -317,6 +327,8 @@ func (g *Game) reset() {
 	g.player.XPMultiplier = 1.0
 	g.player.HasMagicMissile = false
 	g.player.magicMissileFireTimer = 0
+	g.player.MagicMissileCount = 0
+	g.player.MagicMissilePiercing = 0
 
 
 	// Center camera on player
@@ -815,12 +827,41 @@ func (g *Game) updateGameplayScreen() {
 		// Missile radius is small (e.g. image size / 2), enemy radius is enemyCollisionRadius
 		missileRadius := float64(m.Image.Bounds().Dx()) / 2
 		if distToTargetSq < math.Pow(missileRadius+m.TargetEnemy.CollisionRadius, 2) {
-			m.TargetEnemy.Health -= m.Damage
-			m.ToRemove = true
-			// Enemy death (if health <=0) handled by existing Attack-Enemy collision logic,
-			// or we can add it here if missile damage is the only source.
-			// For now, assume enemy health update is enough.
-			// If enemy dies, xp orb will spawn via standard enemy death check.
+			if _, alreadyHit := m.hitTargets[m.TargetEnemy]; !alreadyHit { // Check if this specific missile already hit this target
+				m.TargetEnemy.Health -= m.Damage
+				m.hitTargets[m.TargetEnemy] = true // Mark as hit by this missile instance
+				m.PiercesMade++
+
+				if m.PiercesMade > m.MaxPierces {
+					m.ToRemove = true
+				} else {
+					// Re-target for pierce
+					var nextTarget *Enemy
+					minDistSqForNext := math.MaxFloat64
+					// Find new closest enemy not already hit by this missile
+					for _, potentialNextTarget := range g.enemies {
+						if potentialNextTarget.Health > 0 {
+							if _, ok := m.hitTargets[potentialNextTarget]; !ok { // Not already hit by this missile
+								distSq := math.Pow(potentialNextTarget.X-m.X, 2) + math.Pow(potentialNextTarget.Y-m.Y, 2)
+								// Optional: Check if within a certain re-targeting range from current missile pos
+								if distSq < minDistSqForNext {
+									minDistSqForNext = distSq
+									nextTarget = potentialNextTarget
+								}
+							}
+						}
+					}
+					if nextTarget != nil {
+						m.TargetEnemy = nextTarget // Switch target
+					} else {
+						m.ToRemove = true // No more valid targets to pierce
+					}
+				}
+			} else {
+				// Already hit this target with this missile, do nothing (should ideally not happen if target switches quick)
+				// Or, if it's stuck on a target it already pierced, could mark ToRemove.
+				// For now, this implies it passed through and is continuing.
+			}
 		}
 	}
 
@@ -833,34 +874,76 @@ func (g *Game) updateGameplayScreen() {
 
 			// Find nearest enemy
 			var closestEnemy *Enemy
-			minDistSq := -1.0 // Using -1 to indicate no target found yet, or use math.MaxFloat64
-			targetRangeSq := (screenWidth / 1.5) * (screenWidth / 1.5) // Example range (squared for efficiency)
+			minDistSq := math.MaxFloat64
+			targetRangeSq := (screenWidth * 1.0) * (screenWidth * 1.0) // Increased range slightly
+
+			// Find all valid enemies in range and sort by distance to find N closest
+			type enemyDist struct {
+				enemy *Enemy
+				distSq float64
+			}
+			var enemiesInRange []enemyDist
 
 			for _, enemy := range g.enemies {
 				if enemy.Health > 0 {
 					distSq := math.Pow(enemy.X-g.player.X, 2) + math.Pow(enemy.Y-g.player.Y, 2)
 					if distSq <= targetRangeSq {
-						if closestEnemy == nil || distSq < minDistSq {
-							minDistSq = distSq
-							closestEnemy = enemy
-						}
+						enemiesInRange = append(enemiesInRange, enemyDist{enemy, distSq})
 					}
 				}
 			}
+			// Sort enemies by distance
+			sort.Slice(enemiesInRange, func(i, j int) bool {
+				return enemiesInRange[i].distSq < enemiesInRange[j].distSq
+			})
 
-			if closestEnemy != nil {
+			firedMissiles := 0
+			for i := 0; i < g.player.MagicMissileCount; i++ {
+				var targetForThisMissile *Enemy
+				initialAngleOffset := 0.0 // For second missile if no second target
+
+				if i < len(enemiesInRange) {
+					targetForThisMissile = enemiesInRange[i].enemy
+				} else if i == 1 && len(enemiesInRange) == 1 {
+					// Second missile, but only one target was found for the first. Fire opposite.
+					// Calculate angle to first target, then add PI.
+					firstTargetVecX := enemiesInRange[0].enemy.X - g.player.X
+					firstTargetVecY := enemiesInRange[0].enemy.Y - g.player.Y
+					angleToFirst := math.Atan2(firstTargetVecY, firstTargetVecX)
+					initialAngleOffset = angleToFirst + math.Pi
+					// No specific target, will fly straight unless it acquires one later (not implemented)
+				} else if len(enemiesInRange) == 0 && i == 0 {
+					// No enemies, first missile fires forward (player's "current" direction - we don't have one, so default to right)
+					initialAngleOffset = 0 // Fires right
+				} else if len(enemiesInRange) == 0 && i == 1 {
+					initialAngleOffset = math.Pi // Second missile fires left if no targets
+				} else {
+					break // Not enough targets for more missiles
+				}
+
+
+				missileAngle := initialAngleOffset
+				if targetForThisMissile != nil {
+					missileAngle = math.Atan2(targetForThisMissile.Y-g.player.Y, targetForThisMissile.X-g.player.X)
+				}
+
+
 				newMissile := &MagicMissile{
 					X:            g.player.X,
 					Y:            g.player.Y,
 					Speed:        magicMissileSpeed,
 					Damage:       magicMissileDamage,
-					TargetEnemy:  closestEnemy,
-					CurrentAngle: 0, // Will be set by movement logic
+					TargetEnemy:  targetForThisMissile, // Can be nil if firing directionally
+					CurrentAngle: missileAngle,       // Initial angle based on target or offset
 					timeAlive:    0,
 					Image:        magicMissileImage,
 					ToRemove:     false,
+					MaxPierces:   g.player.MagicMissilePiercing,
+					PiercesMade:  0,
+					hitTargets:   make(map[*Enemy]bool),
 				}
 				g.magicMissiles = append(g.magicMissiles, newMissile)
+				firedMissiles++
 			}
 		}
 	}
@@ -972,9 +1055,27 @@ func (g *Game) updateLevelUpSelectionScreen() {
 				if g.player.CurrentHealth > g.player.MaxHealth {
 					g.player.CurrentHealth = g.player.MaxHealth // Clamp to new max
 				}
-			case "PUP006": // Magic Missile
+			case "PUP006": // Magic Missile (Base)
 				g.player.HasMagicMissile = true
-				g.player.magicMissileFireTimer = magicMissileCooldown // Start cooldown for first shot
+				if g.player.MagicMissileCount < 1 { // Only set to 1 if they don't have it or somehow count is 0
+					g.player.MagicMissileCount = 1
+				}
+				// If they already have it, this PUP appearing again is a bug in selection logic,
+				// or it could be a +1 missile count if we change PUP007.
+				// For now, ensures they have at least 1 missile.
+				g.player.magicMissileFireTimer = magicMissileCooldown
+			case "PUP007": // Twin Barrage (Additional Missile)
+				if g.player.HasMagicMissile { // Prerequisite: must have missiles first
+					g.player.MagicMissileCount++ // For now, allow stacking, e.g. 3, 4 missiles
+					// Consider adding a g.player.MaxMagicMissileCount if desired
+				} else {
+					// If they get this without PUP006, grant PUP006 effects too
+					g.player.HasMagicMissile = true
+					g.player.MagicMissileCount = 2 // Gets base + this one
+					g.player.magicMissileFireTimer = magicMissileCooldown
+				}
+			case "PUP008": // Phantom Edge (Piercing)
+				g.player.MagicMissilePiercing++ // Each selection adds +1 pierce
 			}
 		}
 		g.currentState = StateGameplay // Resume gameplay
