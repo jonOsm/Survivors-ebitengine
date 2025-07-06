@@ -27,6 +27,7 @@ var (
 	pulseAttackImage *ebiten.Image // Semi-transparent white for the pulse itself
 	opaqueClearImage *ebiten.Image // Opaque white, used for CompositeModeClear
 	obstacleImage    *ebiten.Image // Image for obstacles
+	xpOrbImage       *ebiten.Image // Image for XP orbs
 )
 
 // Game implements ebiten.Game interface.
@@ -42,6 +43,17 @@ type Game struct {
 	enemiesPerWave int
 	camX, camY     float64
 	obstacles      []*Obstacle
+	xpOrbs         []*XPOrb // Slice to hold active XP orbs
+	levelUpMessageTimer float64 // For displaying "LEVEL UP!" message
+}
+
+// XPOrb represents an experience point orb dropped by enemies.
+type XPOrb struct {
+	X, Y            float64
+	Value           int // How much XP this orb gives
+	Image           *ebiten.Image
+	CollisionRadius float64
+	Collected       bool // Flag for cleanup
 }
 
 // Obstacle represents a static object in the game world.
@@ -57,6 +69,9 @@ type Player struct {
 	Speed float64
 	Image *ebiten.Image
 	CollisionRadius float64
+	Level           int
+	CurrentXP       int
+	XPToNextLevel   int
 }
 
 // Enemy represents an enemy character.
@@ -71,7 +86,7 @@ type Enemy struct {
 const (
 	playerCollisionRadius = 8 // Half of player image size
 	enemyCollisionRadius  = 6 // Half of enemy image size
-	enemySpeed            = 100 // Pixels per second
+	enemySpeed            = 70 // Pixels per second (reduced from 100)
 	enemyHealth           = 1   // Initial health, can be increased for difficulty
 	defaultEnemySpawnRate = 3.0 // Seconds
 	defaultEnemiesPerWave = 5
@@ -91,6 +106,9 @@ const (
 	pulseAttackMaxRadius      = 32  // Player diameter 16px. 4x is 64px diameter. MaxRadius is half of that.
 	pulseAttackExpansionSpeed = 40  // pixels per second.
 	pulseRingThickness        = 4   // Thickness of the pulse ring in pixels.
+	xpOrbValue                = 25  // XP gained per orb
+	xpOrbCollisionRadius      = 5   // For collecting XP orbs
+	levelUpMessageDuration    = 2.0 // seconds
 )
 
 func init() {
@@ -115,6 +133,9 @@ func init() {
 	obstacleImage = ebiten.NewImage(50, 50) // Example size
 	obstacleImage.Fill(color.Gray{Y: 100})    // Dark gray
 
+	xpOrbImage = ebiten.NewImage(10, 10)
+	xpOrbImage.Fill(color.RGBA{B: 255, A: 255}) // Blue
+
 	rand.Seed(time.Now().UnixNano())
 }
 
@@ -127,6 +148,9 @@ func NewGame() *Game {
 			Speed:           200, // Pixels per second
 			Image:           playerImage,
 			CollisionRadius: playerCollisionRadius,
+			Level:           0,
+			CurrentXP:       0,
+			XPToNextLevel:   calculateXPForLevel(0),
 		},
 		enemies:        []*Enemy{},
 		pulseAttacks:   []*PulseAttack{},
@@ -137,6 +161,8 @@ func NewGame() *Game {
 		enemySpawnRate: defaultEnemySpawnRate,
 		enemiesPerWave: defaultEnemiesPerWave,
 		obstacles:      []*Obstacle{},
+		xpOrbs:         []*XPOrb{},
+		levelUpMessageTimer: 0,
 	}
 	// Initialize camera to center on player
 	g.camX = g.player.X - screenWidth/2
@@ -166,6 +192,11 @@ func (g *Game) reset() {
 	g.player.Y = worldHeight / 2
 	// Player speed and collision radius remain the same.
 
+	// Reset level and XP
+	g.player.Level = 0
+	g.player.CurrentXP = 0
+	g.player.XPToNextLevel = calculateXPForLevel(0)
+
 	// Center camera on player
 	g.camX = g.player.X - screenWidth/2
 	g.camY = g.player.Y - screenHeight/2
@@ -175,11 +206,13 @@ func (g *Game) reset() {
 
 	g.enemies = []*Enemy{}      // Clear enemies
 	g.pulseAttacks = []*PulseAttack{} // Clear attacks
+	g.xpOrbs = []*XPOrb{}       // Clear XP orbs
 
 	g.attackTimer = 0
 	g.spawnTimer = 0 // Reset spawn timer to allow immediate first wave on reset
 	g.score = 0
 	g.gameOver = false // Critical: reset gameOver flag
+	g.levelUpMessageTimer = 0 // Reset level up message timer
 
 	// Reset wave progression if it was dynamic (using defaults here)
 	g.enemySpawnRate = defaultEnemySpawnRate
@@ -447,6 +480,17 @@ func (g *Game) Update() error {
 						enemy.Health-- // Damage the enemy.
 						if enemy.Health <= 0 {
 							g.score += 10 // Award score for defeating an enemy.
+
+							// Spawn an XP Orb
+							orb := &XPOrb{
+								X:               enemy.X,
+								Y:               enemy.Y,
+								Value:           xpOrbValue,
+								Image:           xpOrbImage,
+								CollisionRadius: xpOrbCollisionRadius,
+								Collected:       false,
+							}
+							g.xpOrbs = append(g.xpOrbs, orb)
 							// The enemy will be removed from the game in the cleanup phase.
 						}
 					}
@@ -459,13 +503,40 @@ func (g *Game) Update() error {
 	for _, enemy := range g.enemies {
 		if enemy.Health > 0 { // Only living enemies can collide.
 			dist := distance(g.player.X, g.player.Y, enemy.X, enemy.Y)
-			// Collision occurs if the distance between player and enemy centers
-			// is less than the sum of their collision radii.
 			if dist < g.player.CollisionRadius+enemy.CollisionRadius {
-				g.gameOver = true // Set game over state.
-				// The main update loop will detect g.gameOver and stop further game logic updates.
-				break // No need to check other enemies if game is already over.
+				g.gameOver = true
+				break
 			}
+		}
+	}
+
+	// Player-XPOrb Collision (Collection)
+	for _, orb := range g.xpOrbs {
+		if !orb.Collected {
+			dist := distance(g.player.X, g.player.Y, orb.X, orb.Y)
+			// Player's collision radius + orb's collision radius
+			if dist < g.player.CollisionRadius+orb.CollisionRadius {
+				g.player.CurrentXP += orb.Value
+				orb.Collected = true // Mark for removal
+				// Level up check will happen after all XP is collected in this frame
+			}
+		}
+	}
+
+	// Level Up Check (can happen multiple times if enough XP is gained at once)
+	for g.player.CurrentXP >= g.player.XPToNextLevel {
+		g.player.Level++
+		g.player.CurrentXP -= g.player.XPToNextLevel // Subtract cost of current level, carry over excess
+		g.player.XPToNextLevel = calculateXPForLevel(g.player.Level)
+		log.Printf("Player reached Level %d! Next level in %d XP.", g.player.Level, g.player.XPToNextLevel)
+		g.levelUpMessageTimer = levelUpMessageDuration // Display "LEVEL UP!" message
+	}
+
+	// Decrement level up message timer
+	if g.levelUpMessageTimer > 0 {
+		g.levelUpMessageTimer -= 1.0 / float64(ebiten.TPS())
+		if g.levelUpMessageTimer < 0 {
+			g.levelUpMessageTimer = 0
 		}
 	}
 
@@ -490,6 +561,15 @@ func (g *Game) Update() error {
 			}
 		}
 		g.enemies = aliveEnemies
+
+		// Cleanup collected XPOrbs
+		activeOrbs := make([]*XPOrb, 0, len(g.xpOrbs))
+		for _, orb := range g.xpOrbs {
+			if !orb.Collected {
+				activeOrbs = append(activeOrbs, orb)
+			}
+		}
+		g.xpOrbs = activeOrbs
 	}
 
 	return nil
@@ -565,13 +645,57 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		}
 	}
 
+	// Draw XPOrbs (relative to camera)
+	for _, orb := range g.xpOrbs {
+		if !orb.Collected && orb.Image != nil {
+			opts := &ebiten.DrawImageOptions{}
+			// Orb X,Y is center.
+			opts.GeoM.Translate(-float64(orb.Image.Bounds().Dx())/2, -float64(orb.Image.Bounds().Dy())/2)
+			opts.GeoM.Translate(orb.X, orb.Y)
+			// Apply camera view
+			opts.GeoM.Translate(-g.camX, -g.camY)
+			screen.DrawImage(orb.Image, opts)
+		}
+	}
+
 	// --- UI Elements (drawn in screen space, not affected by camera) ---
 
+	// Draw XP Bar
+	xpBarWidth := screenWidth - 40 // Bar width with some padding
+	xpBarHeight := 20
+	xpBarX := (screenWidth - xpBarWidth) / 2
+	xpBarY := 10
+
+	// Background of XP bar
+	ebitenutil.DrawRect(screen, float64(xpBarX), float64(xpBarY), float64(xpBarWidth), float64(xpBarHeight), color.Gray{Y: 50})
+
+	// Foreground of XP bar (current XP)
+	xpRatio := 0.0
+	if g.player.XPToNextLevel > 0 { // Avoid division by zero if XPToNextLevel is somehow 0
+		xpRatio = float64(g.player.CurrentXP) / float64(g.player.XPToNextLevel)
+	}
+	currentXPWidth := xpRatio * float64(xpBarWidth)
+	ebitenutil.DrawRect(screen, float64(xpBarX), float64(xpBarY), currentXPWidth, float64(xpBarHeight), color.RGBA{R: 100, G: 200, B: 100, A: 255}) // Greenish
+
+	// Draw Level Text
+	levelText := "Level: " + strconv.Itoa(g.player.Level)
+	ebitenutil.DebugPrintAt(screen, levelText, xpBarX, xpBarY+xpBarHeight+5)
+
 	// Display Score and Game Over Message
+	scoreText := "Score: " + strconv.Itoa(g.score)
 	if g.gameOver {
-		ebitenutil.DebugPrint(screen, "GAME OVER\nFinal Score: "+strconv.Itoa(g.score))
+		ebitenutil.DebugPrintAt(screen, "GAME OVER\nFinal Score: "+strconv.Itoa(g.score)+"\nLevel: "+strconv.Itoa(g.player.Level), screenWidth/2-100, screenHeight/2-50) // Centered
 	} else {
-		ebitenutil.DebugPrint(screen, "Score: "+strconv.Itoa(g.score))
+		ebitenutil.DebugPrintAt(screen, scoreText, screenWidth-150, xpBarY+xpBarHeight+5) // Near top right
+	}
+
+	// Display "LEVEL UP!" message
+	if g.levelUpMessageTimer > 0 {
+		levelUpText := "LEVEL UP!"
+		// For "large text" with DebugPrint, we can't scale. We just center it.
+		// True large text would require loading fonts and using text.Draw.
+		textWidth := len(levelUpText) * 6 // Approximate width for DebugPrint characters
+		ebitenutil.DebugPrintAt(screen, levelUpText, screenWidth/2-textWidth/2, screenHeight/2-10)
 	}
 }
 
