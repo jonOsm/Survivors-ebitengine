@@ -1,6 +1,7 @@
 package main
 
 import (
+	"image" // Added for image.Rect
 	"image/color"
 	"log"
 	"math"
@@ -13,8 +14,11 @@ import (
 )
 
 const (
-	screenWidth  = 800
-	screenHeight = 600
+	screenWidth     = 800
+	screenHeight    = 600
+	worldWidth      = screenWidth * 4
+	worldHeight     = screenHeight * 4
+	cameraLerpSpeed = 0.05 // Lower for smoother/slower lerp, higher for faster
 )
 
 var (
@@ -22,6 +26,7 @@ var (
 	enemyImage       *ebiten.Image
 	pulseAttackImage *ebiten.Image // Semi-transparent white for the pulse itself
 	opaqueClearImage *ebiten.Image // Opaque white, used for CompositeModeClear
+	obstacleImage    *ebiten.Image // Image for obstacles
 )
 
 // Game implements ebiten.Game interface.
@@ -35,6 +40,15 @@ type Game struct {
 	gameOver       bool
 	enemySpawnRate float64 // Seconds between enemy spawns
 	enemiesPerWave int
+	camX, camY     float64
+	obstacles      []*Obstacle
+}
+
+// Obstacle represents a static object in the game world.
+type Obstacle struct {
+	X, Y    float64
+	Width, Height float64
+	Image   *ebiten.Image
 }
 
 // Player represents the player character.
@@ -98,6 +112,9 @@ func init() {
 	opaqueClearImage = ebiten.NewImage(1, 1)
 	opaqueClearImage.Fill(color.White) // Fully opaque white
 
+	obstacleImage = ebiten.NewImage(50, 50) // Example size
+	obstacleImage.Fill(color.Gray{Y: 100})    // Dark gray
+
 	rand.Seed(time.Now().UnixNano())
 }
 
@@ -105,8 +122,8 @@ func init() {
 func NewGame() *Game {
 	g := &Game{
 		player: &Player{
-			X:               screenWidth / 2,
-			Y:               screenHeight / 2,
+			X:               worldWidth / 2,  // Start player at world center
+			Y:               worldHeight / 2, // Start player at world center
 			Speed:           200, // Pixels per second
 			Image:           playerImage,
 			CollisionRadius: playerCollisionRadius,
@@ -117,17 +134,44 @@ func NewGame() *Game {
 		spawnTimer:     0,
 		score:          0,
 		gameOver:       false,
-		enemySpawnRate: 3.0, // Initial spawn rate: 3 seconds
-		enemiesPerWave: 5,   // Initial enemies per wave
+		enemySpawnRate: defaultEnemySpawnRate,
+		enemiesPerWave: defaultEnemiesPerWave,
+		obstacles:      []*Obstacle{},
 	}
+	// Initialize camera to center on player
+	g.camX = g.player.X - screenWidth/2
+	g.camY = g.player.Y - screenHeight/2
+	g.camX = clamp(g.camX, 0, worldWidth-screenWidth)    // Clamp initial camera position
+	g.camY = clamp(g.camY, 0, worldHeight-screenHeight) // Clamp initial camera position
+
+	g.initObstacles()
 	return g
+}
+
+func (g *Game) initObstacles() {
+	// For now, a few hardcoded obstacles.
+	// Ensure positions are within worldWidth/worldHeight.
+	// Obstacle X, Y is top-left corner.
+	g.obstacles = []*Obstacle{
+		{X: worldWidth/2 - 200, Y: worldHeight/2 - 25, Width: 100, Height: 50, Image: obstacleImage},
+		{X: worldWidth/2 + 100, Y: worldHeight/2 - 25, Width: 100, Height: 50, Image: obstacleImage},
+		{X: worldWidth/2 - 25, Y: worldHeight/2 - 200, Width: 50, Height: 100, Image: obstacleImage},
+		{X: worldWidth/2 - 25, Y: worldHeight/2 + 100, Width: 50, Height: 100, Image: obstacleImage},
+	}
 }
 
 // reset re-initializes the game state to its starting conditions.
 func (g *Game) reset() {
-	g.player.X = screenWidth / 2
-	g.player.Y = screenHeight / 2
+	g.player.X = worldWidth / 2 // Player resets to world center
+	g.player.Y = worldHeight / 2
 	// Player speed and collision radius remain the same.
+
+	// Center camera on player
+	g.camX = g.player.X - screenWidth/2
+	g.camY = g.player.Y - screenHeight/2
+	g.camX = clamp(g.camX, 0, worldWidth-screenWidth)
+	g.camY = clamp(g.camY, 0, worldHeight-screenHeight)
+
 
 	g.enemies = []*Enemy{}      // Clear enemies
 	g.pulseAttacks = []*PulseAttack{} // Clear attacks
@@ -179,11 +223,79 @@ func (g *Game) Update() error {
 	g.player.X += dx * g.player.Speed / float64(ebiten.TPS())
 	g.player.Y += dy * g.player.Speed / float64(ebiten.TPS())
 
-	// Keep player within screen bounds
-	playerWidth := float64(g.player.Image.Bounds().Dx())
-	playerHeight := float64(g.player.Image.Bounds().Dy())
-	g.player.X = clamp(g.player.X, playerWidth/2, screenWidth-playerWidth/2)
-	g.player.Y = clamp(g.player.Y, playerHeight/2, screenHeight-playerHeight/2)
+	// Store potential new position
+	nextPlayerX := g.player.X
+	nextPlayerY := g.player.Y
+
+	// Player collision with Obstacles
+	// For simplicity, check X-axis collision first, then Y-axis.
+	// This can sometimes lead to getting stuck on corners if not handled with more advanced logic like sliding.
+
+	// Check X-axis collision
+	playerRectX := image.Rect(
+		int(nextPlayerX-g.player.CollisionRadius),
+		int(g.player.Y-g.player.CollisionRadius),
+		int(nextPlayerX+g.player.CollisionRadius),
+		int(g.player.Y+g.player.CollisionRadius),
+	)
+
+	for _, obs := range g.obstacles {
+		obsRect := image.Rect(
+			int(obs.X),
+			int(obs.Y),
+			int(obs.X+obs.Width),
+			int(obs.Y+obs.Height),
+		)
+		if playerRectX.Overlaps(obsRect) {
+			nextPlayerX = g.player.X // Revert X movement
+			break
+		}
+	}
+	g.player.X = nextPlayerX
+
+	// Check Y-axis collision (using the potentially corrected X position)
+	playerRectY := image.Rect(
+		int(g.player.X-g.player.CollisionRadius),
+		int(nextPlayerY-g.player.CollisionRadius),
+		int(g.player.X+g.player.CollisionRadius),
+		int(nextPlayerY+g.player.CollisionRadius),
+	)
+	for _, obs := range g.obstacles {
+		obsRect := image.Rect(
+			int(obs.X),
+			int(obs.Y),
+			int(obs.X+obs.Width),
+			int(obs.Y+obs.Height),
+		)
+		if playerRectY.Overlaps(obsRect) {
+			nextPlayerY = g.player.Y // Revert Y movement
+			break
+		}
+	}
+	g.player.Y = nextPlayerY
+
+
+	// Keep player within world bounds
+	// Player's X, Y is center, so adjust bounds by CollisionRadius
+	g.player.X = clamp(g.player.X, g.player.CollisionRadius, worldWidth-g.player.CollisionRadius)
+	g.player.Y = clamp(g.player.Y, g.player.CollisionRadius, worldHeight-g.player.CollisionRadius)
+
+	// Camera Logic: Smoothly follow the player
+	// Target camera position to center the player on screen
+	targetCamX := g.player.X - screenWidth/2
+	targetCamY := g.player.Y - screenHeight/2
+
+	// Lerp camera towards target position
+	g.camX += (targetCamX - g.camX) * cameraLerpSpeed
+	g.camY += (targetCamY - g.camY) * cameraLerpSpeed
+
+	// Clamp camera to world boundaries
+	// Prevents camera from showing areas outside the defined world.
+	// Max camera X is worldWidth - screenWidth, so the right edge of camera view aligns with world right edge.
+	// Similar for Y.
+	g.camX = clamp(g.camX, 0, worldWidth-screenWidth)
+	g.camY = clamp(g.camY, 0, worldHeight-screenHeight)
+
 
 	// Attack Logic: Player's automatic pulse attack
 	// The attackTimer accumulates time. When it exceeds pulseAttackCooldown (1 second),
@@ -223,24 +335,34 @@ func (g *Game) Update() error {
 
 		for i := 0; i < g.enemiesPerWave; i++ {
 			// Spawn enemies randomly off-screen from one of the four sides.
+			const spawnMargin = 50 // Defines how far off-screen from current view enemies will spawn.
 			var ex, ey float64
-			side := rand.Intn(4) // 0: top, 1: bottom, 2: left, 3: right
-			const spawnMargin = 50 // Defines how far off-screen enemies will spawn.
 
+			// Determine spawn position relative to camera view
+			side := rand.Intn(4) // 0: top, 1: bottom, 2: left, 3: right
 			switch side {
-			case 0: // Top
-				ex = rand.Float64() * screenWidth
-				ey = -spawnMargin
-			case 1: // Bottom
-				ex = rand.Float64() * screenWidth
-				ey = screenHeight + spawnMargin
-			case 2: // Left
-				ex = -spawnMargin
-				ey = rand.Float64() * screenHeight
-			case 3: // Right
-				ex = screenWidth + spawnMargin
-				ey = rand.Float64() * screenHeight
+			case 0: // Top, relative to camera view
+				ex = g.camX + rand.Float64()*screenWidth
+				ey = g.camY - spawnMargin
+			case 1: // Bottom, relative to camera view
+				ex = g.camX + rand.Float64()*screenWidth
+				ey = g.camY + screenHeight + spawnMargin
+			case 2: // Left, relative to camera view
+				ex = g.camX - spawnMargin
+				ey = g.camY + rand.Float64()*screenHeight
+			case 3: // Right, relative to camera view
+				ex = g.camX + screenWidth + spawnMargin
+				ey = g.camY + rand.Float64()*screenHeight
 			}
+
+			// Clamp spawn position to world boundaries
+			// Enemy's X,Y is center, so consider its collision radius for clamping to world edge.
+			ex = clamp(ex, enemyCollisionRadius, worldWidth-enemyCollisionRadius)
+			ey = clamp(ey, enemyCollisionRadius, worldHeight-enemyCollisionRadius)
+
+			// Additional check: if after clamping, the enemy is now on-screen due to camera being at edge,
+			// try to push it further. This is a bit tricky. For now, the clamping might suffice if spawnMargin is large enough.
+			// A more robust solution would be to pick a point on a wider perimeter around the camera.
 
 			newEnemy := &Enemy{
 				X:     ex,
@@ -266,8 +388,48 @@ func (g *Game) Update() error {
 		normalizedDx, normalizedDy := normalizeVector(dx, dy)
 
 		// Move enemy towards player based on its speed and the normalized direction.
-		enemy.X += normalizedDx * enemy.Speed / float64(ebiten.TPS())
-		enemy.Y += normalizedDy * enemy.Speed / float64(ebiten.TPS())
+		potentialEnemyX := enemy.X + normalizedDx*enemy.Speed/float64(ebiten.TPS())
+		potentialEnemyY := enemy.Y + normalizedDy*enemy.Speed/float64(ebiten.TPS())
+
+		// Enemy-Obstacle Collision (similar to player)
+		// Check X-axis
+		enemyRectX := image.Rect(
+			int(potentialEnemyX-enemy.CollisionRadius),
+			int(enemy.Y-enemy.CollisionRadius),
+			int(potentialEnemyX+enemy.CollisionRadius),
+			int(enemy.Y+enemy.CollisionRadius),
+		)
+		collidedX := false
+		for _, obs := range g.obstacles {
+			obsRect := image.Rect(int(obs.X), int(obs.Y), int(obs.X+obs.Width), int(obs.Y+obs.Height))
+			if enemyRectX.Overlaps(obsRect) {
+				collidedX = true
+				break
+			}
+		}
+		if !collidedX {
+			enemy.X = potentialEnemyX
+		}
+
+		// Check Y-axis (using updated enemy.X if it changed, or original if X was blocked)
+		currentEnemyXForYCheck := enemy.X // Use the (potentially reverted) X
+		enemyRectY := image.Rect(
+			int(currentEnemyXForYCheck-enemy.CollisionRadius),
+			int(potentialEnemyY-enemy.CollisionRadius),
+			int(currentEnemyXForYCheck+enemy.CollisionRadius),
+			int(potentialEnemyY+enemy.CollisionRadius),
+		)
+		collidedY := false
+		for _, obs := range g.obstacles {
+			obsRect := image.Rect(int(obs.X), int(obs.Y), int(obs.X+obs.Width), int(obs.Y+obs.Height))
+			if enemyRectY.Overlaps(obsRect) {
+				collidedY = true
+				break
+			}
+		}
+		if !collidedY {
+			enemy.Y = potentialEnemyY
+		}
 	}
 
 	// Collision Detection Logic
@@ -336,42 +498,56 @@ func (g *Game) Update() error {
 // Draw draws the game screen.
 // Draw is called every frame (typically 1/60[s] for 60Hz display).
 func (g *Game) Draw(screen *ebiten.Image) {
+	// Optional: Fill background
+	// screen.Fill(color.NRGBA{R: 10, G: 10, B: 30, A: 255})
+
+	// Draw Obstacles
+	for _, obs := range g.obstacles {
+		if obs.Image != nil {
+			opts := &ebiten.DrawImageOptions{}
+			// Obstacle X,Y is top-left for its image.
+			opts.GeoM.Translate(obs.X, obs.Y)
+			// Apply camera view
+			opts.GeoM.Translate(-g.camX, -g.camY)
+			screen.DrawImage(obs.Image, opts)
+		}
+	}
+
 	// Draw Player
 	if g.player != nil && g.player.Image != nil {
-		playerOpts := &ebiten.DrawImageOptions{}
-		playerOpts.GeoM.Translate(g.player.X-float64(g.player.Image.Bounds().Dx())/2, g.player.Y-float64(g.player.Image.Bounds().Dy())/2)
-		screen.DrawImage(g.player.Image, playerOpts)
+		opts := &ebiten.DrawImageOptions{}
+		// Player X,Y is center. Translate image to be centered.
+		opts.GeoM.Translate(-float64(g.player.Image.Bounds().Dx())/2, -float64(g.player.Image.Bounds().Dy())/2)
+		opts.GeoM.Translate(g.player.X, g.player.Y)
+		// Apply camera view
+		opts.GeoM.Translate(-g.camX, -g.camY)
+		screen.DrawImage(g.player.Image, opts)
 	}
 
 	// Draw Pulse Attacks
 	for _, attack := range g.pulseAttacks {
 		if attack.Radius > 0 && attack.Image != nil {
-			// Draw outer ring
+			// Outer ring
 			outerOpts := &ebiten.DrawImageOptions{}
-			outerScale := attack.Radius * 2
-			outerOpts.GeoM.Scale(outerScale, outerScale)
+			// Image is 1x1, scale to diameter, then position.
+			// Origin for scaling is top-left of the 1x1 image.
+			outerOpts.GeoM.Scale(attack.Radius*2, attack.Radius*2)
+			// Translate scaled image so its center is at attack.X, attack.Y
 			outerOpts.GeoM.Translate(attack.X-attack.Radius, attack.Y-attack.Radius)
-			screen.DrawImage(attack.Image, outerOpts) // attack.Image is the semi-transparent white 1x1 pixel
+			// Apply camera view
+			outerOpts.GeoM.Translate(-g.camX, -g.camY)
+			screen.DrawImage(attack.Image, outerOpts)
 
-			// Draw inner cutout (making it a ring)
-			// The inner radius is the current attack radius minus the desired ring thickness.
-			// Ensure inner radius is not negative.
+			// Inner cutout
 			innerRadius := attack.Radius - pulseRingThickness
 			if innerRadius > 0 {
 				innerOpts := &ebiten.DrawImageOptions{}
-				innerScale := innerRadius * 2
-				innerOpts.GeoM.Scale(innerScale, innerScale)
+				innerOpts.GeoM.Scale(innerRadius*2, innerRadius*2)
 				innerOpts.GeoM.Translate(attack.X-innerRadius, attack.Y-innerRadius)
-
-				// Use CompositeModeClear to make the inner part transparent.
-				// This requires drawing onto an intermediate image if the screen
-				// itself doesn't support clear in the way we want for multiple layers.
-				// A simpler approach for a black background is to draw a black square.
-				// Let's try with CompositeModeClear first.
-				// The pulseAttackImage (1x1 white pixel) can be used.
-				// The color of the image doesn't matter with CompositeModeClear, but alpha does.
+				// Apply camera view
+				innerOpts.GeoM.Translate(-g.camX, -g.camY)
 				innerOpts.CompositeMode = ebiten.CompositeModeClear
-				screen.DrawImage(opaqueClearImage, innerOpts) // Use opaque image for full clear
+				screen.DrawImage(opaqueClearImage, innerOpts)
 			}
 		}
 	}
@@ -380,10 +556,16 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	for _, enemy := range g.enemies {
 		if enemy.Image != nil {
 			opts := &ebiten.DrawImageOptions{}
-			opts.GeoM.Translate(enemy.X-float64(enemy.Image.Bounds().Dx())/2, enemy.Y-float64(enemy.Image.Bounds().Dy())/2)
+			// Enemy X,Y is center.
+			opts.GeoM.Translate(-float64(enemy.Image.Bounds().Dx())/2, -float64(enemy.Image.Bounds().Dy())/2)
+			opts.GeoM.Translate(enemy.X, enemy.Y)
+			// Apply camera view
+			opts.GeoM.Translate(-g.camX, -g.camY)
 			screen.DrawImage(enemy.Image, opts)
 		}
 	}
+
+	// --- UI Elements (drawn in screen space, not affected by camera) ---
 
 	// Display Score and Game Over Message
 	if g.gameOver {
