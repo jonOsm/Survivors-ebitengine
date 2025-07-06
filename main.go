@@ -107,7 +107,7 @@ const (
 	pulseAttackExpansionSpeed = 40  // pixels per second.
 	pulseRingThickness        = 4   // Thickness of the pulse ring in pixels.
 	xpOrbValue                = 25  // XP gained per orb
-	xpOrbCollisionRadius      = 5   // For collecting XP orbs
+	xpOrbCollisionRadius      = 15   // For collecting XP orbs (increased from 5; image is 10x10)
 	levelUpMessageDuration    = 2.0 // seconds
 )
 
@@ -253,63 +253,65 @@ func (g *Game) Update() error {
 		dy /= math.Sqrt(2)
 	}
 
-	g.player.X += dx * g.player.Speed / float64(ebiten.TPS())
-	g.player.Y += dy * g.player.Speed / float64(ebiten.TPS())
+	originalPlayerX := g.player.X // Position at start of this frame's Update()
+	originalPlayerY := g.player.Y
 
-	// Store potential new position
-	nextPlayerX := g.player.X
-	nextPlayerY := g.player.Y
+	// Calculate proposed total movement for this frame
+	dx_frame := dx * g.player.Speed / float64(ebiten.TPS())
+	dy_frame := dy * g.player.Speed / float64(ebiten.TPS())
 
-	// Player collision with Obstacles
-	// For simplicity, check X-axis collision first, then Y-axis.
-	// This can sometimes lead to getting stuck on corners if not handled with more advanced logic like sliding.
+	// Target positions if no collisions occur
+	targetPlayerX := originalPlayerX + dx_frame
+	targetPlayerY := originalPlayerY + dy_frame
 
-	// Check X-axis collision
-	playerRectX := image.Rect(
-		int(nextPlayerX-g.player.CollisionRadius),
-		int(g.player.Y-g.player.CollisionRadius),
-		int(nextPlayerX+g.player.CollisionRadius),
-		int(g.player.Y+g.player.CollisionRadius),
+	// --- Player-Obstacle Collision Resolution ---
+	// We'll try to move along X, then along Y, to handle collisions.
+
+	// Assume player's X will be targetPlayerX unless collision
+	newPlayerX := targetPlayerX
+
+	// Check X-axis collision:
+	// Create a bounding box for the player at (targetPlayerX, originalPlayerY)
+	playerBoundingBoxX := image.Rect(
+		int(targetPlayerX-g.player.CollisionRadius),
+		int(originalPlayerY-g.player.CollisionRadius),
+		int(targetPlayerX+g.player.CollisionRadius),
+		int(originalPlayerY+g.player.CollisionRadius),
 	)
 
 	for _, obs := range g.obstacles {
-		obsRect := image.Rect(
-			int(obs.X),
-			int(obs.Y),
-			int(obs.X+obs.Width),
-			int(obs.Y+obs.Height),
-		)
-		if playerRectX.Overlaps(obsRect) {
-			nextPlayerX = g.player.X // Revert X movement
+		obsRect := image.Rect(int(obs.X), int(obs.Y), int(obs.X+obs.Width), int(obs.Y+obs.Height))
+		if playerBoundingBoxX.Overlaps(obsRect) {
+			newPlayerX = originalPlayerX // Collision on X: revert X movement
 			break
 		}
 	}
-	g.player.X = nextPlayerX
+	g.player.X = newPlayerX // Commit X position (either target or original)
 
-	// Check Y-axis collision (using the potentially corrected X position)
-	playerRectY := image.Rect(
-		int(g.player.X-g.player.CollisionRadius),
-		int(nextPlayerY-g.player.CollisionRadius),
-		int(g.player.X+g.player.CollisionRadius),
-		int(nextPlayerY+g.player.CollisionRadius),
+	// Assume player's Y will be targetPlayerY unless collision
+	newPlayerY := targetPlayerY
+
+	// Check Y-axis collision:
+	// Create a bounding box for the player at (g.player.X (which is newPlayerX), targetPlayerY)
+	playerBoundingBoxY := image.Rect(
+		int(g.player.X-g.player.CollisionRadius),    // Use the already resolved X
+		int(targetPlayerY-g.player.CollisionRadius),
+		int(g.player.X+g.player.CollisionRadius),    // Use the already resolved X
+		int(targetPlayerY+g.player.CollisionRadius),
 	)
+
 	for _, obs := range g.obstacles {
-		obsRect := image.Rect(
-			int(obs.X),
-			int(obs.Y),
-			int(obs.X+obs.Width),
-			int(obs.Y+obs.Height),
-		)
-		if playerRectY.Overlaps(obsRect) {
-			nextPlayerY = g.player.Y // Revert Y movement
+		obsRect := image.Rect(int(obs.X), int(obs.Y), int(obs.X+obs.Width), int(obs.Y+obs.Height))
+		if playerBoundingBoxY.Overlaps(obsRect) {
+			newPlayerY = originalPlayerY // Collision on Y: revert Y movement
 			break
 		}
 	}
-	g.player.Y = nextPlayerY
-
+	g.player.Y = newPlayerY // Commit Y position
 
 	// Keep player within world bounds
-	// Player's X, Y is center, so adjust bounds by CollisionRadius
+	// Player's X, Y is center, so adjust bounds by CollisionRadius.
+	// This clamping is done *after* obstacle collision resolution.
 	g.player.X = clamp(g.player.X, g.player.CollisionRadius, worldWidth-g.player.CollisionRadius)
 	g.player.Y = clamp(g.player.Y, g.player.CollisionRadius, worldHeight-g.player.CollisionRadius)
 
