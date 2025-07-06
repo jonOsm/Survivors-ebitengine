@@ -644,6 +644,52 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			}
 		}
 		screen.DrawImage(g.player.Image, opts)
+
+		// Draw Player's Health Bar (above player, world space)
+		if g.player.CurrentHealth > 0 { // Only draw if alive (though player disappears on death/reset)
+			playerSpriteWidth := float64(g.player.Image.Bounds().Dx())
+			healthBarFullWidth := playerSpriteWidth * 1.2 // Slightly wider than player
+			healthBarHeight := 5.0
+			healthBarGap := 10.0 // Gap above player's sprite top edge
+
+			// Position of the health bar's top-left corner in world coordinates
+			barWorldX := g.player.X - healthBarFullWidth/2
+			barWorldY := g.player.Y - g.player.CollisionRadius - healthBarGap - healthBarHeight
+
+			// Health ratio
+			healthRatio := 0.0
+			if g.player.MaxHealth > 0 {
+				healthRatio = float64(g.player.CurrentHealth) / float64(g.player.MaxHealth)
+			}
+			currentHealthWidth := healthRatio * healthBarFullWidth
+			if currentHealthWidth < 0 { currentHealthWidth = 0 }
+
+			// Background for health bar (dark red or gray)
+			bgOpts := &ebiten.DrawImageOptions{}
+			// Create a 1x1 image for drawing rects if needed, or use ebitenutil.DrawRect equivalent for world space
+			// For world space rects, it's easier to use a 1x1 image and scale/color it.
+			// Let's use opaqueClearImage (1x1 white) and color it.
+			bgOpts.GeoM.Scale(healthBarFullWidth, healthBarHeight)
+			bgOpts.GeoM.Translate(barWorldX, barWorldY)
+			bgOpts.GeoM.Translate(-g.camX, -g.camY) // Apply camera
+			bgOpts.ColorScale.Scale(0.3, 0.3, 0.3, 1) // Dark Gray
+			screen.DrawImage(opaqueClearImage, bgOpts)
+
+			// Foreground for health bar (green or bright red)
+			fgOpts := &ebiten.DrawImageOptions{}
+			fgOpts.GeoM.Scale(currentHealthWidth, healthBarHeight)
+			fgOpts.GeoM.Translate(barWorldX, barWorldY) // Position is the same as background
+			fgOpts.GeoM.Translate(-g.camX, -g.camY) // Apply camera
+			fgOpts.ColorScale.Scale(0.8, 0.2, 0.2, 1) // Red
+			if healthRatio > 0.6 { // Green if high health
+				fgOpts.ColorScale.Reset()
+				fgOpts.ColorScale.Scale(0.2, 0.8, 0.2, 1)
+			} else if healthRatio > 0.3 { // Yellow if medium health
+				fgOpts.ColorScale.Reset()
+				fgOpts.ColorScale.Scale(0.8, 0.8, 0.2, 1)
+			}
+			screen.DrawImage(opaqueClearImage, fgOpts)
+		}
 	}
 
 	// Draw Pulse Attacks
@@ -721,26 +767,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 	// Draw Level Text
 	levelText := "Level: " + strconv.Itoa(g.player.Level)
-	ebitenutil.DebugPrintAt(screen, levelText, xpBarX, xpBarY+xpBarHeight+5)
-
-	// Draw Health Bar (below XP Bar)
-	healthBarWidth := screenWidth - 40 // Same width as XP bar
-	healthBarHeight := 15 // Slightly slimmer than XP bar
-	healthBarX := xpBarX
-	healthBarY := xpBarY + xpBarHeight + 10 // Positioned below XP bar with a small gap
-
-	// Background of Health bar
-	ebitenutil.DrawRect(screen, float64(healthBarX), float64(healthBarY), float64(healthBarWidth), float64(healthBarHeight), color.Gray{Y: 50})
-
-	// Foreground of Health bar (current health)
-	healthRatio := 0.0
-	if g.player.MaxHealth > 0 {
-		healthRatio = float64(g.player.CurrentHealth) / float64(g.player.MaxHealth)
-	}
-	currentHealthWidth := healthRatio * float64(healthBarWidth)
-	// Ensure width is not negative if health is somehow negative before death check
-	if currentHealthWidth < 0 { currentHealthWidth = 0 }
-	ebitenutil.DrawRect(screen, float64(healthBarX), float64(healthBarY), currentHealthWidth, float64(healthBarHeight), color.RGBA{R: 220, G: 50, B: 50, A: 255}) // Reddish
+	ebitenutil.DebugPrintAt(screen, levelText, xpBarX, xpBarY+xpBarHeight+5) // Stays in screen space
 
 	// Display Score and Game Over Message
 	scoreText := "Score: " + strconv.Itoa(g.score)
