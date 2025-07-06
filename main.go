@@ -18,9 +18,10 @@ const (
 )
 
 var (
-	playerImage       *ebiten.Image
-	enemyImage        *ebiten.Image
-	pulseAttackImage  *ebiten.Image // Placeholder, will be a transparent square
+	playerImage      *ebiten.Image
+	enemyImage       *ebiten.Image
+	pulseAttackImage *ebiten.Image // Semi-transparent white for the pulse itself
+	opaqueClearImage *ebiten.Image // Opaque white, used for CompositeModeClear
 )
 
 // Game implements ebiten.Game interface.
@@ -73,8 +74,9 @@ type PulseAttack struct {
 
 const (
 	pulseAttackCooldown       = 1.0 // seconds
-	pulseAttackMaxRadius      = 150
-	pulseAttackExpansionSpeed = 100 // pixels per second
+	pulseAttackMaxRadius      = 16  // Player is 16px, so diameter is 16. Twice diameter is 32. MaxRadius is half of that.
+	pulseAttackExpansionSpeed = 40  // pixels per second. Adjusted for smaller radius.
+	pulseRingThickness        = 4   // Thickness of the pulse ring in pixels.
 )
 
 func init() {
@@ -92,6 +94,9 @@ func init() {
 	// We will draw this scaled up.
 	pulseAttackImage = ebiten.NewImage(1, 1) // 1x1 pixel, will be scaled
 	pulseAttackImage.Fill(color.RGBA{R: 255, G: 255, B: 255, A: 100}) // Semi-transparent white
+
+	opaqueClearImage = ebiten.NewImage(1, 1)
+	opaqueClearImage.Fill(color.White) // Fully opaque white
 
 	rand.Seed(time.Now().UnixNano())
 }
@@ -319,11 +324,33 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	// Draw Pulse Attacks
 	for _, attack := range g.pulseAttacks {
 		if attack.Radius > 0 && attack.Image != nil {
-			opts := &ebiten.DrawImageOptions{}
-			scale := attack.Radius * 2
-			opts.GeoM.Scale(scale, scale)
-			opts.GeoM.Translate(attack.X-attack.Radius, attack.Y-attack.Radius)
-			screen.DrawImage(attack.Image, opts)
+			// Draw outer ring
+			outerOpts := &ebiten.DrawImageOptions{}
+			outerScale := attack.Radius * 2
+			outerOpts.GeoM.Scale(outerScale, outerScale)
+			outerOpts.GeoM.Translate(attack.X-attack.Radius, attack.Y-attack.Radius)
+			screen.DrawImage(attack.Image, outerOpts) // attack.Image is the semi-transparent white 1x1 pixel
+
+			// Draw inner cutout (making it a ring)
+			// The inner radius is the current attack radius minus the desired ring thickness.
+			// Ensure inner radius is not negative.
+			innerRadius := attack.Radius - pulseRingThickness
+			if innerRadius > 0 {
+				innerOpts := &ebiten.DrawImageOptions{}
+				innerScale := innerRadius * 2
+				innerOpts.GeoM.Scale(innerScale, innerScale)
+				innerOpts.GeoM.Translate(attack.X-innerRadius, attack.Y-innerRadius)
+
+				// Use CompositeModeClear to make the inner part transparent.
+				// This requires drawing onto an intermediate image if the screen
+				// itself doesn't support clear in the way we want for multiple layers.
+				// A simpler approach for a black background is to draw a black square.
+				// Let's try with CompositeModeClear first.
+				// The pulseAttackImage (1x1 white pixel) can be used.
+				// The color of the image doesn't matter with CompositeModeClear, but alpha does.
+				innerOpts.CompositeMode = ebiten.CompositeModeClear
+				screen.DrawImage(opaqueClearImage, innerOpts) // Use opaque image for full clear
+			}
 		}
 	}
 
