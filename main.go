@@ -742,43 +742,53 @@ func (g *Game) updateLevelUpSelectionScreen() {
 		int(cardY+levelUpCardHeight),
 	)
 
-	// Mouse Hover Logic
-	mx, my := ebiten.CursorPosition()
+	keyboardActivityThisFrame := false
+	mx, my := ebiten.CursorPosition() // Get mouse position once at the start
 	mousePoint := image.Point{X: mx, Y: my}
 
-	if mousePoint.In(card1Rect) {
-		g.levelUpSelectedCardIndex = 0
-	} else if mousePoint.In(card2Rect) {
-		g.levelUpSelectedCardIndex = 1
-	}
-
-	// Keyboard selection (Left/Right or A/D)
+	// Keyboard selection (Left/Right or A/D) - takes precedence for setting index
 	if inpututil.IsKeyJustPressed(ebiten.KeyLeft) || inpututil.IsKeyJustPressed(ebiten.KeyA) {
 		g.levelUpSelectedCardIndex--
 		if g.levelUpSelectedCardIndex < 0 {
 			g.levelUpSelectedCardIndex = 1 // Wrap
 		}
+		keyboardActivityThisFrame = true
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyRight) || inpututil.IsKeyJustPressed(ebiten.KeyD) {
 		g.levelUpSelectedCardIndex++
 		if g.levelUpSelectedCardIndex > 1 {
 			g.levelUpSelectedCardIndex = 0 // Wrap
 		}
+		keyboardActivityThisFrame = true
+	}
+
+	// Mouse Hover Logic - updates selection if no keyboard activity this frame
+	if !keyboardActivityThisFrame {
+		if mousePoint.In(card1Rect) && g.currentPowerUpChoices[0] != nil {
+			g.levelUpSelectedCardIndex = 0
+		} else if mousePoint.In(card2Rect) && g.currentPowerUpChoices[1] != nil {
+			g.levelUpSelectedCardIndex = 1
+		}
+		// If mouse is not over any valid card, g.levelUpSelectedCardIndex remains as it was (e.g. from keyboard or previous hover)
 	}
 
 	// Confirm selection
-	confirmed := false
+	actionConfirmed := false
 	if inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeySpace) {
-		confirmed = true
+		actionConfirmed = true // Keyboard confirm uses current g.levelUpSelectedCardIndex
 	}
+
 	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
-		// Check if click was on the currently selected card index (which might have been updated by hover)
-		if (g.levelUpSelectedCardIndex == 0 && mousePoint.In(card1Rect)) || (g.levelUpSelectedCardIndex == 1 && mousePoint.In(card2Rect)) {
-			confirmed = true
+		if mousePoint.In(card1Rect) && g.currentPowerUpChoices[0] != nil {
+			g.levelUpSelectedCardIndex = 0 // Ensure selection matches click
+			actionConfirmed = true
+		} else if mousePoint.In(card2Rect) && g.currentPowerUpChoices[1] != nil {
+			g.levelUpSelectedCardIndex = 1 // Ensure selection matches click
+			actionConfirmed = true
 		}
 	}
 
-	if confirmed {
+	if actionConfirmed {
 		chosenPowerUp := g.currentPowerUpChoices[g.levelUpSelectedCardIndex]
 		if chosenPowerUp != nil {
 			log.Printf("Player selected Power-Up: %s (ID: %s)", chosenPowerUp.Title, chosenPowerUp.ID)
