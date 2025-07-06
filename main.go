@@ -2,6 +2,7 @@ package main
 
 import (
 	"image" // Added for image.Rect
+	"fmt" // For Sprintf in dev interface
 	"image/color"
 	"log"
 	"math"
@@ -90,6 +91,7 @@ type Game struct {
 	loseSelectedOption       int // 0 for Retry, 1 for Main Menu
 	levelUpSelectedCardIndex int // 0 or 1 for the two choices
 	currentPowerUpChoices    [2]*PowerUpDefinition
+	showDevInterface         bool // Toggled by F2
 }
 
 // XPOrb represents an experience point orb dropped by enemies.
@@ -234,6 +236,7 @@ func NewGame() *Game {
 		loseSelectedOption:  0, // Default to "Retry"
 		levelUpSelectedCardIndex: 0,
 		currentPowerUpChoices: [2]*PowerUpDefinition{nil, nil}, // Initialize with nils
+		showDevInterface:    false,
 	}
 	// Initialize camera to center on player
 	g.camX = g.player.X - screenWidth/2
@@ -301,6 +304,11 @@ func (g *Game) reset() {
 // Update proceeds the game state.
 // Update is called every tick (1/60 [s] by default).
 func (g *Game) Update() error {
+	// Global input checks (like dev interface toggle)
+	if inpututil.IsKeyJustPressed(ebiten.KeyF2) {
+		g.showDevInterface = !g.showDevInterface
+	}
+
 	switch g.currentState {
 	case StateTitleScreen:
 		g.updateTitleScreen()
@@ -876,7 +884,64 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	case StateLoseScreen:
 		g.drawLoseScreen(screen)
 	}
+
+	// Draw Dev Interface if active (on top of everything else)
+	if g.showDevInterface {
+		g.drawDevInterface(screen)
+	}
 }
+
+func (g *Game) drawDevInterface(screen *ebiten.Image) {
+	devInterfaceX := 10.0
+	devInterfaceY := float64(screenHeight) - 250.0 // Position from bottom
+	devInterfaceWidth := 280.0
+	devInterfaceHeight := 240.0
+	padding := 5.0
+	lineHeight := 15.0
+
+	// Background panel
+	bgColor := color.NRGBA{R: 0, G: 0, B: 0, A: 180}
+	ebitenutil.DrawRect(screen, devInterfaceX, devInterfaceY, devInterfaceWidth, devInterfaceHeight, bgColor)
+
+	currentY := devInterfaceY + padding
+
+	// Helper to draw next line
+	drawLine := func(text string) {
+		ebitenutil.DebugPrintAt(screen, text, int(devInterfaceX+padding), int(currentY))
+		currentY += lineHeight
+	}
+
+	drawLine(fmt.Sprintf("FPS: %.2f, TPS: %.2f", ebiten.ActualFPS(), ebiten.ActualTPS()))
+
+	var stateStr string
+	switch g.currentState {
+	case StateTitleScreen: stateStr = "TitleScreen"
+	case StateGameplay: stateStr = "Gameplay"
+	case StateLevelUpSelection: stateStr = "LevelUpSelection"
+	case StateLoseScreen: stateStr = "LoseScreen"
+	default: stateStr = "Unknown"
+	}
+	drawLine(fmt.Sprintf("State: %s", stateStr))
+
+	drawLine("--- Player ---")
+	drawLine(fmt.Sprintf("Pos: (%.1f, %.1f)", g.player.X, g.player.Y))
+	drawLine(fmt.Sprintf("HP: %d/%d, Lvl: %d", g.player.CurrentHealth, g.player.MaxHealth, g.player.Level))
+	drawLine(fmt.Sprintf("XP: %d/%d", g.player.CurrentXP, g.player.XPToNextLevel))
+	drawLine(fmt.Sprintf("Speed: %.1f, AtkCD: %.2f", g.player.Speed, g.player.AttackCooldown))
+	drawLine(fmt.Sprintf("AtkRadius: %.1f, XPMulti: %.2f", g.player.AttackMaxRadius, g.player.XPMultiplier))
+	drawLine(fmt.Sprintf("InvulTime: %.2f", g.player.invulnerabilityTimer))
+	if len(g.player.AcquiredPowerUps) > 0 {
+		drawLine(fmt.Sprintf("PowerUps: %s", strings.Join(g.player.AcquiredPowerUps, ", ")))
+	} else {
+		drawLine("PowerUps: None")
+	}
+
+
+	drawLine("--- Game ---")
+	drawLine(fmt.Sprintf("Enemies: %d, Attacks: %d, Orbs: %d", len(g.enemies), len(g.pulseAttacks), len(g.xpOrbs)))
+	drawLine(fmt.Sprintf("Cam: (%.1f, %.1f)", g.camX, g.camY))
+}
+
 
 func (g *Game) drawLevelUpSelectionScreen(screen *ebiten.Image) {
 	// 1. Draw paused gameplay screen as background
