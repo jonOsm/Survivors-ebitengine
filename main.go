@@ -652,10 +652,8 @@ func (g *Game) updateGameplayScreen() {
 			}
 		}
 		g.xpOrbs = activeOrbs
-	}
-
-	// return nil // updateGameplayScreen does not return error
-}
+	// } // This was the end of the old 'if !g.gameOver' block, now removed.
+} // This is the correct end of updateGameplayScreen()
 
 func (g *Game) updateLoseScreen() {
 	if inpututil.IsKeyJustPressed(ebiten.KeyUp) {
