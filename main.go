@@ -32,6 +32,7 @@ var (
 	opaqueClearImage *ebiten.Image // Opaque white, used for CompositeModeClear
 	obstacleImage    *ebiten.Image // Image for obstacles
 	xpOrbImage       *ebiten.Image // Image for XP orbs
+	magicMissileImage *ebiten.Image // Image for magic missiles
 )
 
 // GameState defines the current state of the game.
@@ -69,6 +70,19 @@ var availablePowerUps = []PowerUpDefinition{
 	{"PUP003", "Increased XP Gain", "Gain more XP from orbs."},
 	{"PUP004", "Larger Attack Radius", "Pulse attack maximum radius increased."},
 	{"PUP005", "Extra Health", "Increases Max Health by a small amount."},
+	{"PUP006", "Magic Missile", "Fires a homing missile every 2s that weaves and deals 2 damage."},
+}
+
+// MagicMissile represents a homing, weaving projectile.
+type MagicMissile struct {
+	X, Y           float64
+	Speed          float64
+	Damage         int
+	TargetEnemy    *Enemy // Could be nil if target dies
+	CurrentAngle   float64 // For rotation and possibly movement logic
+	timeAlive      float64 // For weaving pattern and lifetime
+	Image          *ebiten.Image
+	ToRemove       bool
 }
 
 // Game implements ebiten.Game interface.
@@ -76,6 +90,7 @@ type Game struct {
 	player                   *Player
 	enemies                  []*Enemy
 	pulseAttacks             []*PulseAttack
+	magicMissiles            []*MagicMissile // New slice for magic missiles
 	attackTimer              float64 // Seconds
 	spawnTimer               float64 // Seconds
 	score                    int
@@ -129,6 +144,10 @@ type Player struct {
 	AttackCooldown   float64 // Current attack cooldown in seconds
 	AttackMaxRadius  float64 // Current max radius for pulse attack
 	XPMultiplier     float64 // Multiplier for XP gained
+
+	// Magic Missile specific
+	HasMagicMissile      bool
+	magicMissileFireTimer float64 // Cooldown timer for firing missiles
 }
 
 // Enemy represents an enemy character.
@@ -165,6 +184,14 @@ const (
 	basePulseAttackMaxRadius  = 32.0
 	pulseAttackExpansionSpeed = 40    // pixels per second (remains constant for now)
 	pulseRingThickness        = 4     // Thickness of the pulse ring in pixels.
+
+	magicMissileCooldown = 2.0   // seconds
+	magicMissileSpeed    = 180.0 // pixels per second
+	magicMissileDamage   = 2     // Pulse effectively does 1 damage to 1-HP enemies
+	magicMissileLifetime = 4.0   // seconds
+	magicMissileWeaveFrequency = 5.0 // Radians per second for oscillation
+	magicMissileWeaveMagnitude = 20.0 // Sideways pixels
+
 	xpOrbValue                = 25    // XP gained per orb
 	xpOrbCollisionRadius      = 15   // For collecting XP orbs (increased from 5; image is 10x10)
 	levelUpMessageDuration    = 2.0 // seconds
@@ -198,6 +225,12 @@ func init() {
 	xpOrbImage = ebiten.NewImage(10, 10)
 	xpOrbImage.Fill(color.RGBA{B: 255, A: 255}) // Blue
 
+	magicMissileImage = ebiten.NewImage(8, 8)
+	// Simple pointed shape (approximate triangle pointing right)
+	// For a real game, use a proper sprite.
+	// This will be a small square for now, rotation will make it look more dynamic.
+	magicMissileImage.Fill(color.RGBA{R: 0, G: 255, B: 255, A: 255}) // Cyan
+
 	rand.Seed(time.Now().UnixNano())
 }
 
@@ -220,6 +253,8 @@ func NewGame() *Game {
 			AttackCooldown:  basePulseAttackCooldown,
 			AttackMaxRadius: basePulseAttackMaxRadius,
 			XPMultiplier:    1.0,
+			HasMagicMissile: false,
+			magicMissileFireTimer: 0,
 		},
 		enemies:        []*Enemy{},
 		pulseAttacks:   []*PulseAttack{},
@@ -239,6 +274,7 @@ func NewGame() *Game {
 		currentPowerUpChoices: [2]*PowerUpDefinition{nil, nil}, // Initialize with nils
 		showDevInterface:         false,
 		levelUpSelectionInputMode: "keyboard", // Default to keyboard, or set in prepareLevelUpChoices
+		magicMissiles:            []*MagicMissile{},
 	}
 	// Initialize camera to center on player
 	g.camX = g.player.X - screenWidth/2
@@ -279,6 +315,9 @@ func (g *Game) reset() {
 	g.player.AttackCooldown = basePulseAttackCooldown
 	g.player.AttackMaxRadius = basePulseAttackMaxRadius
 	g.player.XPMultiplier = 1.0
+	g.player.HasMagicMissile = false
+	g.player.magicMissileFireTimer = 0
+
 
 	// Center camera on player
 	g.camX = g.player.X - screenWidth/2
@@ -290,6 +329,7 @@ func (g *Game) reset() {
 	g.enemies = []*Enemy{}      // Clear enemies
 	g.pulseAttacks = []*PulseAttack{} // Clear attacks
 	g.xpOrbs = []*XPOrb{}       // Clear XP orbs
+	g.magicMissiles = []*MagicMissile{} // Clear magic missiles
 
 	g.attackTimer = 0
 	g.spawnTimer = 0 // Reset spawn timer to allow immediate first wave on reset
@@ -720,7 +760,110 @@ func (g *Game) updateGameplayScreen() {
 			}
 		}
 		g.xpOrbs = activeOrbs
+
+		// Cleanup removed Magic Missiles
+		activeMagicMissiles := make([]*MagicMissile, 0, len(g.magicMissiles))
+		for _, m := range g.magicMissiles {
+			if !m.ToRemove {
+				activeMagicMissiles = append(activeMagicMissiles, m)
+			}
+		}
+		g.magicMissiles = activeMagicMissiles
 	// } // This was the end of the old 'if !g.gameOver' block, now removed.
+
+	// Update Magic Missiles
+	for _, m := range g.magicMissiles {
+		if m.ToRemove {
+			continue
+		}
+
+		m.timeAlive += 1.0 / float64(ebiten.TPS())
+		if m.timeAlive > magicMissileLifetime {
+			m.ToRemove = true
+			continue
+		}
+
+		if m.TargetEnemy == nil || m.TargetEnemy.Health <= 0 {
+			// Target lost or dead, missile could continue straight or dissipate
+			// For now, let it dissipate (mark for removal)
+			m.ToRemove = true
+			continue
+		}
+
+		// Homing and Weaving Movement
+		targetX, targetY := m.TargetEnemy.X, m.TargetEnemy.Y
+		dirToTargetX, dirToTargetY := normalizeVector(targetX-m.X, targetY-m.Y)
+
+		// Update current angle for drawing rotation
+		m.CurrentAngle = math.Atan2(dirToTargetY, dirToTargetX)
+
+		// Weaving: perpendicular oscillation
+		// Sideways vector: (-dirToTargetY, dirToTargetX)
+		oscillationFactor := math.Sin(m.timeAlive*magicMissileWeaveFrequency) * magicMissileWeaveMagnitude
+		weaveDX := -dirToTargetY * oscillationFactor
+		weaveDY := dirToTargetX * oscillationFactor
+
+		// Final velocity components
+		vx := (dirToTargetX*m.Speed + weaveDX) / float64(ebiten.TPS())
+		vy := (dirToTargetY*m.Speed + weaveDY) / float64(ebiten.TPS())
+
+		m.X += vx
+		m.Y += vy
+
+		// Collision with TargetEnemy
+		distToTargetSq := math.Pow(m.TargetEnemy.X-m.X, 2) + math.Pow(m.TargetEnemy.Y-m.Y, 2)
+		// Missile radius is small (e.g. image size / 2), enemy radius is enemyCollisionRadius
+		missileRadius := float64(m.Image.Bounds().Dx()) / 2
+		if distToTargetSq < math.Pow(missileRadius+m.TargetEnemy.CollisionRadius, 2) {
+			m.TargetEnemy.Health -= m.Damage
+			m.ToRemove = true
+			// Enemy death (if health <=0) handled by existing Attack-Enemy collision logic,
+			// or we can add it here if missile damage is the only source.
+			// For now, assume enemy health update is enough.
+			// If enemy dies, xp orb will spawn via standard enemy death check.
+		}
+	}
+
+
+	// Magic Missile Firing Logic
+	if g.player.HasMagicMissile {
+		g.player.magicMissileFireTimer -= 1.0 / float64(ebiten.TPS())
+		if g.player.magicMissileFireTimer <= 0 {
+			g.player.magicMissileFireTimer = magicMissileCooldown
+
+			// Find nearest enemy
+			var closestEnemy *Enemy
+			minDistSq := -1.0 // Using -1 to indicate no target found yet, or use math.MaxFloat64
+			targetRangeSq := (screenWidth / 1.5) * (screenWidth / 1.5) // Example range (squared for efficiency)
+
+			for _, enemy := range g.enemies {
+				if enemy.Health > 0 {
+					distSq := math.Pow(enemy.X-g.player.X, 2) + math.Pow(enemy.Y-g.player.Y, 2)
+					if distSq <= targetRangeSq {
+						if closestEnemy == nil || distSq < minDistSq {
+							minDistSq = distSq
+							closestEnemy = enemy
+						}
+					}
+				}
+			}
+
+			if closestEnemy != nil {
+				newMissile := &MagicMissile{
+					X:            g.player.X,
+					Y:            g.player.Y,
+					Speed:        magicMissileSpeed,
+					Damage:       magicMissileDamage,
+					TargetEnemy:  closestEnemy,
+					CurrentAngle: 0, // Will be set by movement logic
+					timeAlive:    0,
+					Image:        magicMissileImage,
+					ToRemove:     false,
+				}
+				g.magicMissiles = append(g.magicMissiles, newMissile)
+			}
+		}
+	}
 } // This is the correct end of updateGameplayScreen()
 
 func (g *Game) updateLevelUpSelectionScreen() {
@@ -829,6 +972,9 @@ func (g *Game) updateLevelUpSelectionScreen() {
 				if g.player.CurrentHealth > g.player.MaxHealth {
 					g.player.CurrentHealth = g.player.MaxHealth // Clamp to new max
 				}
+			case "PUP006": // Magic Missile
+				g.player.HasMagicMissile = true
+				g.player.magicMissileFireTimer = magicMissileCooldown // Start cooldown for first shot
 			}
 		}
 		g.currentState = StateGameplay // Resume gameplay
@@ -1249,6 +1395,23 @@ func (g *Game) drawGameplayScreen(screen *ebiten.Image) {
 			screen.DrawImage(orb.Image, opts)
 		}
 	}
+
+	// Draw Magic Missiles (relative to camera)
+	for _, m := range g.magicMissiles {
+		if !m.ToRemove && m.Image != nil {
+			opts := &ebiten.DrawImageOptions{}
+			// Center the image before rotation and translation
+			opts.GeoM.Translate(-float64(m.Image.Bounds().Dx())/2, -float64(m.Image.Bounds().Dy())/2)
+			// Rotate
+			opts.GeoM.Rotate(m.CurrentAngle)
+			// Translate to missile's world position
+			opts.GeoM.Translate(m.X, m.Y)
+			// Apply camera view
+			opts.GeoM.Translate(-g.camX, -g.camY)
+			screen.DrawImage(m.Image, opts)
+		}
+	}
+
 
 	// --- UI Elements (drawn in screen space, not affected by camera) ---
 
