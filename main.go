@@ -149,8 +149,8 @@ func (g *Game) Update() error {
 		dy /= math.Sqrt(2)
 	}
 
-	g.player.X += dx * g.player.Speed / ebiten.TPS()
-	g.player.Y += dy * g.player.Speed / ebiten.TPS()
+	g.player.X += dx * g.player.Speed / float64(ebiten.TPS())
+	g.player.Y += dy * g.player.Speed / float64(ebiten.TPS())
 
 	// Keep player within screen bounds
 	playerWidth := float64(g.player.Image.Bounds().Dx())
@@ -161,7 +161,7 @@ func (g *Game) Update() error {
 	// Attack Logic: Player's automatic pulse attack
 	// The attackTimer accumulates time. When it exceeds pulseAttackCooldown (1 second),
 	// a new attack is spawned, and the timer resets.
-	g.attackTimer += 1.0 / ebiten.TPS() // ebiten.TPS() gives ticks per second.
+	g.attackTimer += 1.0 / float64(ebiten.TPS()) // ebiten.TPS() gives ticks per second.
 	if g.attackTimer >= pulseAttackCooldown {
 		g.attackTimer = 0 // Reset timer
 		// Create a new pulse attack at player's current location
@@ -179,14 +179,14 @@ func (g *Game) Update() error {
 	// Update existing pulse attacks
 	// We will handle removal in the cleanup step later, for now just update
 	for _, attack := range g.pulseAttacks {
-		attack.Radius += attack.ExpansionSpeed / ebiten.TPS()
+		attack.Radius += attack.ExpansionSpeed / float64(ebiten.TPS())
 	}
 
 	// Enemy Spawning Logic
 	// The spawnTimer accumulates time. When it exceeds g.enemySpawnRate (e.g., 3 seconds),
 	// a new wave of enemies is spawned, and the timer resets.
 	// Enemies are spawned randomly along the edges, just outside the screen view.
-	g.spawnTimer += 1.0 / ebiten.TPS()
+	g.spawnTimer += 1.0 / float64(ebiten.TPS())
 	if g.spawnTimer >= g.enemySpawnRate {
 		g.spawnTimer = 0 // Reset spawn timer
 		// Example: Increase difficulty over time (optional)
@@ -239,8 +239,8 @@ func (g *Game) Update() error {
 		normalizedDx, normalizedDy := normalizeVector(dx, dy)
 
 		// Move enemy towards player based on its speed and the normalized direction.
-		enemy.X += normalizedDx * enemy.Speed / ebiten.TPS()
-		enemy.Y += normalizedDy * enemy.Speed / ebiten.TPS()
+		enemy.X += normalizedDx * enemy.Speed / float64(ebiten.TPS())
+		enemy.Y += normalizedDy * enemy.Speed / float64(ebiten.TPS())
 	}
 
 	// Collision Detection Logic
