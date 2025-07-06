@@ -917,29 +917,30 @@ func (g *Game) updateGameplayScreen() {
 
 				if i < len(enemiesInRange) {
 					targetForThisMissile = enemiesInRange[i].enemy
-				} else if i == 1 && len(enemiesInRange) == 1 {
-					// Second missile, but only one target was found for the first. Fire opposite.
-					// Calculate angle to first target, then add PI.
-					firstTargetVecX := enemiesInRange[0].enemy.X - g.player.X
-					firstTargetVecY := enemiesInRange[0].enemy.Y - g.player.Y
-					angleToFirst := math.Atan2(firstTargetVecY, firstTargetVecX)
-					initialAngleOffset = angleToFirst + math.Pi
-					// No specific target, will fly straight unless it acquires one later (not implemented)
-				} else if len(enemiesInRange) == 0 && i == 0 {
-					// No enemies, first missile fires forward (player's "current" direction - we don't have one, so default to right)
-					initialAngleOffset = 0 // Fires right
-				} else if len(enemiesInRange) == 0 && i == 1 {
-					initialAngleOffset = math.Pi // Second missile fires left if no targets
-				} else {
-					break // Not enough targets for more missiles
+				} else { // Not enough distinct enemies for this missile index i
+					targetForThisMissile = nil // Default to no specific target
+					if i == 0 { // First missile, but no enemies were in range at all
+						initialAngleOffset = 0 // Default fire right for the first missile
+					} else if i == 1 { // Second missile
+						if len(enemiesInRange) == 1 { // Only one enemy was found (targeted by missile 0)
+							// Fire opposite to the first target's vector
+							firstTargetVecX := enemiesInRange[0].enemy.X - g.player.X
+							firstTargetVecY := enemiesInRange[0].enemy.Y - g.player.Y
+							angleToFirst := math.Atan2(firstTargetVecY, firstTargetVecX)
+							initialAngleOffset = angleToFirst + math.Pi
+						} else { // No enemies were found at all (len(enemiesInRange) == 0)
+							initialAngleOffset = math.Pi // Default fire left for the second missile
+						}
+					} else {
+						// For 3rd+ missiles with no targets, could assign fixed spread angles or break
+						break // Or assign a default angle based on 'i'
+					}
 				}
 
-
-				missileAngle := initialAngleOffset
+				missileAngle := initialAngleOffset // Use offset if target is nil
 				if targetForThisMissile != nil {
 					missileAngle = math.Atan2(targetForThisMissile.Y-g.player.Y, targetForThisMissile.X-g.player.X)
 				}
-
 
 				newMissile := &MagicMissile{
 					X:            g.player.X,
