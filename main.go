@@ -121,6 +121,11 @@ type Player struct {
 	MaxHealth       int
 	invulnerabilityTimer float64 // Seconds
 	AcquiredPowerUps []string // Stores IDs of acquired power-ups
+
+	// Modifiable stats by power-ups
+	AttackCooldown   float64 // Current attack cooldown in seconds
+	AttackMaxRadius  float64 // Current max radius for pulse attack
+	XPMultiplier     float64 // Multiplier for XP gained
 }
 
 // Enemy represents an enemy character.
@@ -145,17 +150,19 @@ const (
 type PulseAttack struct {
 	X, Y           float64
 	Radius         float64
-	MaxRadius      float64
+	MaxRadius      float64 // This will now be set from player's stat when attack is created
 	ExpansionSpeed float64
 	Image          *ebiten.Image // This will be dynamically resized or redrawn
 }
 
+// Base player and attack stats (before power-ups)
 const (
-	pulseAttackCooldown       = 1.0 // seconds
-	pulseAttackMaxRadius      = 32  // Player diameter 16px. 4x is 64px diameter. MaxRadius is half of that.
-	pulseAttackExpansionSpeed = 40  // pixels per second.
-	pulseRingThickness        = 4   // Thickness of the pulse ring in pixels.
-	xpOrbValue                = 25  // XP gained per orb
+	basePlayerSpeed           = 200.0
+	basePulseAttackCooldown   = 1.0   // seconds
+	basePulseAttackMaxRadius  = 32.0
+	pulseAttackExpansionSpeed = 40    // pixels per second (remains constant for now)
+	pulseRingThickness        = 4     // Thickness of the pulse ring in pixels.
+	xpOrbValue                = 25    // XP gained per orb
 	xpOrbCollisionRadius      = 15   // For collecting XP orbs (increased from 5; image is 10x10)
 	levelUpMessageDuration    = 2.0 // seconds
 	playerMaxHealth           = 100
@@ -206,6 +213,10 @@ func NewGame() *Game {
 			MaxHealth:       playerMaxHealth,
 			CurrentHealth:   playerMaxHealth,
 			invulnerabilityTimer: 0,
+			Speed:           basePlayerSpeed, // Initialize with base value
+			AttackCooldown:  basePulseAttackCooldown,
+			AttackMaxRadius: basePulseAttackMaxRadius,
+			XPMultiplier:    1.0,
 		},
 		enemies:        []*Enemy{},
 		pulseAttacks:   []*PulseAttack{},
@@ -260,6 +271,10 @@ func (g *Game) reset() {
 	g.player.CurrentHealth = playerMaxHealth
 	g.player.invulnerabilityTimer = 0
 	g.player.AcquiredPowerUps = []string{} // Clear acquired power-ups
+	g.player.Speed = basePlayerSpeed
+	g.player.AttackCooldown = basePulseAttackCooldown
+	g.player.AttackMaxRadius = basePulseAttackMaxRadius
+	g.player.XPMultiplier = 1.0
 
 	// Center camera on player
 	g.camX = g.player.X - screenWidth/2
@@ -432,17 +447,17 @@ func (g *Game) updateGameplayScreen() {
 
 
 	// Attack Logic: Player's automatic pulse attack
-	// The attackTimer accumulates time. When it exceeds pulseAttackCooldown (1 second),
+	// The attackTimer accumulates time. When it exceeds player's AttackCooldown,
 	// a new attack is spawned, and the timer resets.
 	g.attackTimer += 1.0 / float64(ebiten.TPS()) // ebiten.TPS() gives ticks per second.
-	if g.attackTimer >= pulseAttackCooldown {
+	if g.attackTimer >= g.player.AttackCooldown { // Use player's current attack cooldown
 		g.attackTimer = 0 // Reset timer
 		// Create a new pulse attack at player's current location
 		newAttack := &PulseAttack{
 			X:              g.player.X,
 			Y:              g.player.Y,
 			Radius:         0,
-			MaxRadius:      pulseAttackMaxRadius,
+			MaxRadius:      g.player.AttackMaxRadius, // Use player's current attack max radius
 			ExpansionSpeed: pulseAttackExpansionSpeed,
 			Image:          pulseAttackImage, // Using the base 1x1 image
 		}
@@ -624,7 +639,8 @@ func (g *Game) updateGameplayScreen() {
 			dist := distance(g.player.X, g.player.Y, orb.X, orb.Y)
 			// Player's collision radius + orb's collision radius
 			if dist < g.player.CollisionRadius+orb.CollisionRadius {
-				g.player.CurrentXP += orb.Value
+				xpGained := float64(orb.Value) * g.player.XPMultiplier
+				g.player.CurrentXP += int(xpGained)
 				orb.Collected = true // Mark for removal
 				// Level up check will happen after all XP is collected in this frame
 			}
@@ -760,6 +776,28 @@ func (g *Game) updateLevelUpSelectionScreen() {
 		if chosenPowerUp != nil {
 			log.Printf("Player selected Power-Up: %s (ID: %s)", chosenPowerUp.Title, chosenPowerUp.ID)
 			g.player.AcquiredPowerUps = append(g.player.AcquiredPowerUps, chosenPowerUp.ID)
+
+			// Apply power-up effects
+			switch chosenPowerUp.ID {
+			case "PUP001": // Speed Boost
+				g.player.Speed += 20 // Flat increase
+			case "PUP002": // Attack Speed Up
+				g.player.AttackCooldown *= 0.85 // 15% faster
+				if g.player.AttackCooldown < 0.1 { // Prevent excessively fast attacks
+					g.player.AttackCooldown = 0.1
+				}
+			case "PUP003": // Increased XP Gain
+				g.player.XPMultiplier += 0.25
+			case "PUP004": // Larger Attack Radius
+				g.player.AttackMaxRadius *= 1.25
+			case "PUP005": // Extra Health
+				bonusHealth := 25
+				g.player.MaxHealth += bonusHealth
+				g.player.CurrentHealth += bonusHealth // Heal by the bonus amount as well
+				if g.player.CurrentHealth > g.player.MaxHealth {
+					g.player.CurrentHealth = g.player.MaxHealth // Clamp to new max
+				}
+			}
 		}
 		g.currentState = StateGameplay // Resume gameplay
 	}
