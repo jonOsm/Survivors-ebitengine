@@ -206,7 +206,7 @@ func NewGame() *Game {
 		player: &Player{
 			X:               worldWidth / 2,  // Start player at world center
 			Y:               worldHeight / 2, // Start player at world center
-			Speed:           200, // Pixels per second
+			// Speed:           200, // Pixels per second // Removed duplicate
 			Image:           playerImage,
 			CollisionRadius: playerCollisionRadius,
 			Level:           0,
@@ -264,7 +264,6 @@ func (g *Game) initObstacles() {
 func (g *Game) reset() {
 	g.player.X = worldWidth / 2 // Player resets to world center
 	g.player.Y = worldHeight / 2
-	// Player speed and collision radius remain the same.
 
 	// Reset level and XP
 	g.player.Level = 0
