@@ -872,12 +872,8 @@ func (g *Game) updateGameplayScreen() {
 		if g.player.magicMissileFireTimer <= 0 {
 			g.player.magicMissileFireTimer = magicMissileCooldown
 
-			// Find nearest enemy
-			var closestEnemy *Enemy
-			minDistSq := math.MaxFloat64
-			targetRangeSq := (screenWidth * 1.0) * (screenWidth * 1.0) // Increased range slightly
-
 			// Find all valid enemies in range and sort by distance to find N closest
+			targetRangeSq := (screenWidth * 1.0) * (screenWidth * 1.0) // Increased range slightly
 			type enemyDist struct {
 				enemy *Enemy
 				distSq float64
