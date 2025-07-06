@@ -699,23 +699,35 @@ func (g *Game) drawTitleScreen(screen *ebiten.Image) {
 	screen.Fill(color.NRGBA{R: 20, G: 20, B: 40, A: 255}) // Dark blue background for title
 
 	titleText := "Go Survivor"
-	titleTextWidth := len(titleText) * 6 // Approximate width
-	ebitenutil.DebugPrintAt(screen, titleText, screenWidth/2-titleTextWidth*2, screenHeight/4) // Larger text by spacing
+	titleTextPixelWidth := len(titleText) * 6 // Approximate pixel width of default font characters
+	titleX := (screenWidth - titleTextPixelWidth) / 2
+	ebitenutil.DebugPrintAt(screen, titleText, titleX, screenHeight/4)
 
+	optionStartY := screenHeight / 2
+	lineHeight := 20 // Spacing between menu items
+
+	// Option 1: Start Game
 	startText := "Start Game"
-	quitText := "Quit"
-
 	if g.titleSelectedOption == 0 {
 		startText = "> " + startText
-	} else {
+	}
+	startTextPixelWidth := len(startText) * 6
+	startX := (screenWidth - startTextPixelWidth) / 2
+	ebitenutil.DebugPrintAt(screen, startText, startX, optionStartY)
+
+	// Option 2: Quit
+	quitText := "Quit"
+	if g.titleSelectedOption == 1 {
 		quitText = "> " + quitText
 	}
-
-	ebitenutil.DebugPrintAt(screen, startText, screenWidth/2-50, screenHeight/2)
-	ebitenutil.DebugPrintAt(screen, quitText, screenWidth/2-50, screenHeight/2+30)
+	quitTextPixelWidth := len(quitText) * 6
+	quitX := (screenWidth - quitTextPixelWidth) / 2
+	ebitenutil.DebugPrintAt(screen, quitText, quitX, optionStartY+lineHeight)
 
 	instructions := "Use Up/Down Arrows & Enter"
-	ebitenutil.DebugPrintAt(screen, instructions, screenWidth/2-len(instructions)*3, screenHeight-50)
+	instructionsPixelWidth := len(instructions) * 6
+	instructionsX := (screenWidth - instructionsPixelWidth) / 2
+	ebitenutil.DebugPrintAt(screen, instructions, instructionsX, screenHeight-50)
 }
 
 func (g *Game) drawGameplayScreen(screen *ebiten.Image) {
@@ -727,7 +739,18 @@ func (g *Game) drawGameplayScreen(screen *ebiten.Image) {
 	for _, obs := range g.obstacles {
 		if obs.Image != nil {
 			opts := &ebiten.DrawImageOptions{}
-			// Obstacle X,Y is top-left for its image.
+
+			// Get original image dimensions for scaling
+			imgWidth := float64(obs.Image.Bounds().Dx())
+			imgHeight := float64(obs.Image.Bounds().Dy())
+
+			if imgWidth > 0 && imgHeight > 0 { // Avoid division by zero if image is empty
+				scaleX := obs.Width / imgWidth
+				scaleY := obs.Height / imgHeight
+				opts.GeoM.Scale(scaleX, scaleY)
+			}
+
+			// Obstacle X,Y is top-left for its (now potentially scaled) image.
 			opts.GeoM.Translate(obs.X, obs.Y)
 			// Apply camera view
 			opts.GeoM.Translate(-g.camX, -g.camY)
@@ -895,31 +918,44 @@ func (g *Game) drawGameplayScreen(screen *ebiten.Image) {
 func (g *Game) drawLoseScreen(screen *ebiten.Image) {
 	screen.Fill(color.NRGBA{R: 50, G: 20, B: 20, A: 255}) // Dark red background for lose screen
 
-	loseText := "YOU DIED"
-	textWidth := len(loseText) * 6 // Approximate width
-	ebitenutil.DebugPrintAt(screen, loseText, screenWidth/2-textWidth*2, screenHeight/4) // Larger text by spacing
+	loseMsgText := "YOU DIED"
+	loseMsgTextPixelWidth := len(loseMsgText) * 6
+	loseMsgX := (screenWidth - loseMsgTextPixelWidth) / 2
+	ebitenutil.DebugPrintAt(screen, loseMsgText, loseMsgX, screenHeight/4)
 
 	finalScoreText := "Final Score: " + strconv.Itoa(g.score)
-	ebitenutil.DebugPrintAt(screen, finalScoreText, screenWidth/2-len(finalScoreText)*3, screenHeight/4+40)
+	finalScorePixelWidth := len(finalScoreText) * 6
+	finalScoreX := (screenWidth - finalScorePixelWidth) / 2
+	ebitenutil.DebugPrintAt(screen, finalScoreText, finalScoreX, screenHeight/4+40)
 
 	finalLevelText := "Level Reached: " + strconv.Itoa(g.player.Level)
-	ebitenutil.DebugPrintAt(screen, finalLevelText, screenWidth/2-len(finalLevelText)*3, screenHeight/4+60)
+	finalLevelPixelWidth := len(finalLevelText) * 6
+	finalLevelX := (screenWidth - finalLevelPixelWidth) / 2
+	ebitenutil.DebugPrintAt(screen, finalLevelText, finalLevelX, screenHeight/4+60)
 
+	optionStartY := screenHeight/2 + 30
+	lineHeight := 20
 
 	retryText := "Retry"
-	menuText := "Main Menu"
-
 	if g.loseSelectedOption == 0 {
 		retryText = "> " + retryText
-	} else {
+	}
+	retryTextPixelWidth := len(retryText) * 6
+	retryX := (screenWidth - retryTextPixelWidth) / 2
+	ebitenutil.DebugPrintAt(screen, retryText, retryX, optionStartY)
+
+	menuText := "Main Menu"
+	if g.loseSelectedOption == 1 {
 		menuText = "> " + menuText
 	}
-
-	ebitenutil.DebugPrintAt(screen, retryText, screenWidth/2-50, screenHeight/2+30)
-	ebitenutil.DebugPrintAt(screen, menuText, screenWidth/2-50, screenHeight/2+60)
+	menuTextPixelWidth := len(menuText) * 6
+	menuX := (screenWidth - menuTextPixelWidth) / 2
+	ebitenutil.DebugPrintAt(screen, menuText, menuX, optionStartY+lineHeight)
 
 	instructions := "Use Up/Down Arrows & Enter"
-	ebitenutil.DebugPrintAt(screen, instructions, screenWidth/2-len(instructions)*3, screenHeight-50)
+	instructionsPixelWidth := len(instructions) * 6
+	instructionsX := (screenWidth - instructionsPixelWidth) / 2
+	ebitenutil.DebugPrintAt(screen, instructions, instructionsX, screenHeight-50)
 }
 
 
