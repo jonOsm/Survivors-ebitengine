@@ -6,11 +6,13 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"os" // For os.Exit
 	"strconv"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/inpututil" // For IsKeyJustPressed
 )
 
 const (
@@ -30,21 +32,33 @@ var (
 	xpOrbImage       *ebiten.Image // Image for XP orbs
 )
 
+// GameState defines the current state of the game.
+type GameState int
+
+const (
+	StateTitleScreen GameState = iota
+	StateGameplay
+	StateLoseScreen
+)
+
 // Game implements ebiten.Game interface.
 type Game struct {
-	player         *Player
-	enemies        []*Enemy
-	pulseAttacks   []*PulseAttack
-	attackTimer    float64 // Seconds
-	spawnTimer     float64 // Seconds
-	score          int
-	gameOver       bool
-	enemySpawnRate float64 // Seconds between enemy spawns
-	enemiesPerWave int
-	camX, camY     float64
-	obstacles      []*Obstacle
-	xpOrbs         []*XPOrb // Slice to hold active XP orbs
-	levelUpMessageTimer float64 // For displaying "LEVEL UP!" message
+	player              *Player
+	enemies             []*Enemy
+	pulseAttacks        []*PulseAttack
+	attackTimer         float64 // Seconds
+	spawnTimer          float64 // Seconds
+	score               int
+	enemySpawnRate      float64 // Seconds between enemy spawns
+	enemiesPerWave      int
+	camX, camY          float64
+	obstacles           []*Obstacle
+	xpOrbs              []*XPOrb // Slice to hold active XP orbs
+	levelUpMessageTimer float64  // For displaying "LEVEL UP!" message
+
+	currentState        GameState
+	titleSelectedOption int // 0 for Start, 1 for Quit
+	loseSelectedOption  int // 0 for Retry, 1 for Main Menu
 }
 
 // XPOrb represents an experience point orb dropped by enemies.
@@ -166,12 +180,15 @@ func NewGame() *Game {
 		attackTimer:    0,
 		spawnTimer:     0,
 		score:          0,
-		gameOver:       false,
+		// gameOver:       false, // Removed
 		enemySpawnRate: defaultEnemySpawnRate,
 		enemiesPerWave: defaultEnemiesPerWave,
 		obstacles:      []*Obstacle{},
 		xpOrbs:         []*XPOrb{},
 		levelUpMessageTimer: 0,
+		currentState:        StateTitleScreen,
+		titleSelectedOption: 0, // Default to "Start Game"
+		loseSelectedOption:  0, // Default to "Retry"
 	}
 	// Initialize camera to center on player
 	g.camX = g.player.X - screenWidth/2
@@ -223,7 +240,7 @@ func (g *Game) reset() {
 	g.attackTimer = 0
 	g.spawnTimer = 0 // Reset spawn timer to allow immediate first wave on reset
 	g.score = 0
-	g.gameOver = false // Critical: reset gameOver flag
+	// g.gameOver = false // No longer needed here, state transitions handle flow
 	g.levelUpMessageTimer = 0 // Reset level up message timer
 
 	// Reset wave progression if it was dynamic (using defaults here)
@@ -234,12 +251,45 @@ func (g *Game) reset() {
 // Update proceeds the game state.
 // Update is called every tick (1/60 [s] by default).
 func (g *Game) Update() error {
-	if g.gameOver {
-		// If game was over, reset it.
-		// This effectively makes the "Game Over" state momentary before reset.
-		g.reset()
-		// No return here, allow the update to proceed for the fresh game state once.
+	switch g.currentState {
+	case StateTitleScreen:
+		g.updateTitleScreen()
+	case StateGameplay:
+		g.updateGameplayScreen()
+	case StateLoseScreen:
+		g.updateLoseScreen()
 	}
+	return nil
+}
+
+func (g *Game) updateTitleScreen() {
+	if inpututil.IsKeyJustPressed(ebiten.KeyUp) {
+		g.titleSelectedOption--
+		if g.titleSelectedOption < 0 {
+			g.titleSelectedOption = 1 // Wrap around (0: Start, 1: Quit)
+		}
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyDown) {
+		g.titleSelectedOption++
+		if g.titleSelectedOption > 1 {
+			g.titleSelectedOption = 0 // Wrap around
+		}
+	}
+
+	if inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeySpace) {
+		switch g.titleSelectedOption {
+		case 0: // Start Game
+			g.reset() // Reset game state for a fresh start
+			g.currentState = StateGameplay
+		case 1: // Quit
+			os.Exit(0)
+		}
+	}
+}
+
+func (g *Game) updateGameplayScreen() {
+	// NOTE: The g.gameOver check and immediate reset logic is removed from here.
+	// Player death (CurrentHealth <= 0) will now trigger a state change to StateLoseScreen.
 
 	// Player movement
 	var dx, dy float64
@@ -569,17 +619,16 @@ func (g *Game) Update() error {
 
 	// Player Death Check
 	if g.player.CurrentHealth <= 0 {
-		g.gameOver = true
-		// Game reset will be handled at the start of the next Update cycle.
+		g.currentState = StateLoseScreen // Transition to Lose Screen
+		return // Stop further gameplay updates for this frame
 	}
 
-	// Entity Cleanup: Remove "dead" entities (if game is not over).
-	// This is done by creating new slices containing only the "alive" entities
-	// and then replacing the old slices. This is an efficient way to filter slices in Go.
-	if !g.gameOver {
-		// Cleanup Pulse Attacks that have exceeded their MaxRadius.
-		activeAttacks := make([]*PulseAttack, 0, len(g.pulseAttacks))
-		for _, attack := range g.pulseAttacks {
+	// Entity Cleanup: Remove "dead" entities.
+	// This section should always run if in gameplay, regardless of g.gameOver (which is removed)
+	// The transition to StateLoseScreen effectively stops gameplay logic for next frame.
+	// Cleanup Pulse Attacks that have exceeded their MaxRadius.
+	activeAttacks := make([]*PulseAttack, 0, len(g.pulseAttacks))
+	for _, attack := range g.pulseAttacks {
 			if attack.Radius <= attack.MaxRadius { // Keep only attacks within their effective radius.
 				activeAttacks = append(activeAttacks, attack)
 			}
@@ -605,12 +654,74 @@ func (g *Game) Update() error {
 		g.xpOrbs = activeOrbs
 	}
 
-	return nil
+	// return nil // updateGameplayScreen does not return error
+}
+
+func (g *Game) updateLoseScreen() {
+	if inpututil.IsKeyJustPressed(ebiten.KeyUp) {
+		g.loseSelectedOption--
+		if g.loseSelectedOption < 0 {
+			g.loseSelectedOption = 1 // Wrap around (0: Retry, 1: Main Menu)
+		}
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyDown) {
+		g.loseSelectedOption++
+		if g.loseSelectedOption > 1 {
+			g.loseSelectedOption = 0 // Wrap around
+		}
+	}
+
+	if inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeySpace) {
+		switch g.loseSelectedOption {
+		case 0: // Retry
+			g.reset() // Reset game state
+			g.currentState = StateGameplay
+		case 1: // Main Menu
+			// Optionally reset selected option for title screen if needed, or let it persist
+			g.titleSelectedOption = 0
+			g.currentState = StateTitleScreen
+		}
+	}
 }
 
 // Draw draws the game screen.
 // Draw is called every frame (typically 1/60[s] for 60Hz display).
 func (g *Game) Draw(screen *ebiten.Image) {
+	switch g.currentState {
+	case StateTitleScreen:
+		g.drawTitleScreen(screen)
+	case StateGameplay:
+		g.drawGameplayScreen(screen)
+	case StateLoseScreen:
+		g.drawLoseScreen(screen)
+	}
+}
+
+func (g *Game) drawTitleScreen(screen *ebiten.Image) {
+	screen.Fill(color.NRGBA{R: 20, G: 20, B: 40, A: 255}) // Dark blue background for title
+
+	titleText := "Go Survivor"
+	titleTextWidth := len(titleText) * 6 // Approximate width
+	ebitenutil.DebugPrintAt(screen, titleText, screenWidth/2-titleTextWidth*2, screenHeight/4) // Larger text by spacing
+
+	startText := "Start Game"
+	quitText := "Quit"
+
+	if g.titleSelectedOption == 0 {
+		startText = "> " + startText
+	} else {
+		quitText = "> " + quitText
+	}
+
+	ebitenutil.DebugPrintAt(screen, startText, screenWidth/2-50, screenHeight/2)
+	ebitenutil.DebugPrintAt(screen, quitText, screenWidth/2-50, screenHeight/2+30)
+
+	instructions := "Use Up/Down Arrows & Enter"
+	ebitenutil.DebugPrintAt(screen, instructions, screenWidth/2-len(instructions)*3, screenHeight-50)
+}
+
+func (g *Game) drawGameplayScreen(screen *ebiten.Image) {
+	// This will contain the existing core game draw logic
 	// Optional: Fill background
 	// screen.Fill(color.NRGBA{R: 10, G: 10, B: 30, A: 255})
 
@@ -769,13 +880,9 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	levelText := "Level: " + strconv.Itoa(g.player.Level)
 	ebitenutil.DebugPrintAt(screen, levelText, xpBarX, xpBarY+xpBarHeight+5) // Stays in screen space
 
-	// Display Score and Game Over Message
+	// Display Score
 	scoreText := "Score: " + strconv.Itoa(g.score)
-	if g.gameOver {
-		ebitenutil.DebugPrintAt(screen, "GAME OVER\nFinal Score: "+strconv.Itoa(g.score)+"\nLevel: "+strconv.Itoa(g.player.Level), screenWidth/2-100, screenHeight/2-50) // Centered
-	} else {
-		ebitenutil.DebugPrintAt(screen, scoreText, screenWidth-150, xpBarY+xpBarHeight+5) // Near top right
-	}
+	ebitenutil.DebugPrintAt(screen, scoreText, screenWidth-150, xpBarY+xpBarHeight+5) // Near top right
 
 	// Display "LEVEL UP!" message
 	if g.levelUpMessageTimer > 0 {
@@ -786,6 +893,37 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		ebitenutil.DebugPrintAt(screen, levelUpText, screenWidth/2-textWidth/2, screenHeight/2-10)
 	}
 }
+
+func (g *Game) drawLoseScreen(screen *ebiten.Image) {
+	screen.Fill(color.NRGBA{R: 50, G: 20, B: 20, A: 255}) // Dark red background for lose screen
+
+	loseText := "YOU DIED"
+	textWidth := len(loseText) * 6 // Approximate width
+	ebitenutil.DebugPrintAt(screen, loseText, screenWidth/2-textWidth*2, screenHeight/4) // Larger text by spacing
+
+	finalScoreText := "Final Score: " + strconv.Itoa(g.score)
+	ebitenutil.DebugPrintAt(screen, finalScoreText, screenWidth/2-len(finalScoreText)*3, screenHeight/4+40)
+
+	finalLevelText := "Level Reached: " + strconv.Itoa(g.player.Level)
+	ebitenutil.DebugPrintAt(screen, finalLevelText, screenWidth/2-len(finalLevelText)*3, screenHeight/4+60)
+
+
+	retryText := "Retry"
+	menuText := "Main Menu"
+
+	if g.loseSelectedOption == 0 {
+		retryText = "> " + retryText
+	} else {
+		menuText = "> " + menuText
+	}
+
+	ebitenutil.DebugPrintAt(screen, retryText, screenWidth/2-50, screenHeight/2+30)
+	ebitenutil.DebugPrintAt(screen, menuText, screenWidth/2-50, screenHeight/2+60)
+
+	instructions := "Use Up/Down Arrows & Enter"
+	ebitenutil.DebugPrintAt(screen, instructions, screenWidth/2-len(instructions)*3, screenHeight-50)
+}
+
 
 // Layout takes the outside size (e.g., window size) and returns the (logical) screen size.
 // If you don't have to adjust the screen size with the outside size, just return a fixed size.
