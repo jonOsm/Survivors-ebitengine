@@ -91,7 +91,8 @@ type Game struct {
 	loseSelectedOption       int // 0 for Retry, 1 for Main Menu
 	levelUpSelectedCardIndex int // 0 or 1 for the two choices
 	currentPowerUpChoices    [2]*PowerUpDefinition
-	showDevInterface         bool // Toggled by F2
+	showDevInterface         bool   // Toggled by F2
+	levelUpSelectionInputMode string // "keyboard" or "mouse"
 }
 
 // XPOrb represents an experience point orb dropped by enemies.
@@ -236,7 +237,8 @@ func NewGame() *Game {
 		loseSelectedOption:  0, // Default to "Retry"
 		levelUpSelectedCardIndex: 0,
 		currentPowerUpChoices: [2]*PowerUpDefinition{nil, nil}, // Initialize with nils
-		showDevInterface:    false,
+		showDevInterface:         false,
+		levelUpSelectionInputMode: "keyboard", // Default to keyboard, or set in prepareLevelUpChoices
 	}
 	// Initialize camera to center on player
 	g.camX = g.player.X - screenWidth/2
@@ -742,53 +744,66 @@ func (g *Game) updateLevelUpSelectionScreen() {
 		int(cardY+levelUpCardHeight),
 	)
 
-	keyboardActivityThisFrame := false
-	mx, my := ebiten.CursorPosition() // Get mouse position once at the start
+	mx, my := ebiten.CursorPosition()
 	mousePoint := image.Point{X: mx, Y: my}
 
-	// Keyboard selection (Left/Right or A/D) - takes precedence for setting index
+	// Keyboard Navigation
 	if inpututil.IsKeyJustPressed(ebiten.KeyLeft) || inpututil.IsKeyJustPressed(ebiten.KeyA) {
 		g.levelUpSelectedCardIndex--
 		if g.levelUpSelectedCardIndex < 0 {
-			g.levelUpSelectedCardIndex = 1 // Wrap
+			g.levelUpSelectedCardIndex = 1 // Wrap (assuming 2 options 0 and 1)
 		}
-		keyboardActivityThisFrame = true
+		g.levelUpSelectionInputMode = "keyboard"
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyRight) || inpututil.IsKeyJustPressed(ebiten.KeyD) {
 		g.levelUpSelectedCardIndex++
-		if g.levelUpSelectedCardIndex > 1 {
+		if g.levelUpSelectedCardIndex > 1 { // Assuming 2 options
 			g.levelUpSelectedCardIndex = 0 // Wrap
 		}
-		keyboardActivityThisFrame = true
+		g.levelUpSelectionInputMode = "keyboard"
 	}
 
-	// Mouse Hover Logic - updates selection if no keyboard activity this frame
-	if !keyboardActivityThisFrame {
+	// Mouse Hover for visual selection update (if mode is mouse)
+	if g.levelUpSelectionInputMode == "mouse" {
 		if mousePoint.In(card1Rect) && g.currentPowerUpChoices[0] != nil {
 			g.levelUpSelectedCardIndex = 0
 		} else if mousePoint.In(card2Rect) && g.currentPowerUpChoices[1] != nil {
 			g.levelUpSelectedCardIndex = 1
 		}
-		// If mouse is not over any valid card, g.levelUpSelectedCardIndex remains as it was (e.g. from keyboard or previous hover)
+		// If mouse is not over any valid card, selection remains.
 	}
+	// If mode is "keyboard", mouse hover does not change logical selection index.
+	// Visual hover effect could still be drawn based on mousePoint directly in Draw,
+	// but logical selection for Enter key should stick to keyboard choice.
+	// For simplicity, highlight will follow g.levelUpSelectedCardIndex.
 
-	// Confirm selection
+	// Confirmation Action
 	actionConfirmed := false
 	if inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeySpace) {
-		actionConfirmed = true // Keyboard confirm uses current g.levelUpSelectedCardIndex
+		actionConfirmed = true // Keyboard confirms current g.levelUpSelectedCardIndex
 	}
 
 	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
 		if mousePoint.In(card1Rect) && g.currentPowerUpChoices[0] != nil {
-			g.levelUpSelectedCardIndex = 0 // Ensure selection matches click
+			g.levelUpSelectedCardIndex = 0    // Click selects this card
+			g.levelUpSelectionInputMode = "mouse" // Click switches mode to mouse
 			actionConfirmed = true
 		} else if mousePoint.In(card2Rect) && g.currentPowerUpChoices[1] != nil {
-			g.levelUpSelectedCardIndex = 1 // Ensure selection matches click
+			g.levelUpSelectedCardIndex = 1    // Click selects this card
+			g.levelUpSelectionInputMode = "mouse" // Click switches mode to mouse
 			actionConfirmed = true
 		}
 	}
 
 	if actionConfirmed {
+		// Ensure a valid choice is made if only one power-up was available
+		if g.currentPowerUpChoices[g.levelUpSelectedCardIndex] == nil && g.levelUpSelectedCardIndex == 1 && g.currentPowerUpChoices[0] != nil {
+			// If second choice is nil and selected, but first is not, default to first.
+			// This case might occur if only one powerup was presented.
+			g.levelUpSelectedCardIndex = 0
+		}
+
+
 		chosenPowerUp := g.currentPowerUpChoices[g.levelUpSelectedCardIndex]
 		if chosenPowerUp != nil {
 			log.Printf("Player selected Power-Up: %s (ID: %s)", chosenPowerUp.Title, chosenPowerUp.ID)
@@ -850,7 +865,8 @@ func (g *Game) prepareLevelUpChoices() {
 	g.currentPowerUpChoices[0] = &shuffledChoices[0]
 	g.currentPowerUpChoices[1] = &shuffledChoices[1]
 
-	g.levelUpSelectedCardIndex = 0 // Default to selecting the first card
+	g.levelUpSelectedCardIndex = 0    // Default to selecting the first card
+	g.levelUpSelectionInputMode = "keyboard" // Default to keyboard mode when screen appears
 }
 
 func (g *Game) updateLoseScreen() {
