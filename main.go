@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os" // For os.Exit
 	"strconv"
+	"strings" // For text wrapping
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -39,26 +40,56 @@ const (
 	StateTitleScreen GameState = iota
 	StateGameplay
 	StateLoseScreen
+	StateLevelUpSelection // New state for choosing power-ups
 )
+
+// Card dimensions and layout constants for level up screen
+const (
+	levelUpCardWidth      = float64(screenWidth / 3) // Width of a single card
+	levelUpCardHeight     = float64(screenHeight / 2) // Height of a single card
+	levelUpCardSpacing    = 20.0                     // Horizontal space between cards
+	levelUpCardPadding    = 15.0                     // Padding inside the card for text
+	levelUpTitleOffsetY   = 20.0
+	levelUpDescOffsetY    = 50.0
+	levelUpOptionMaxChars = 30 // Approx chars per line for description wrapping
+)
+
+
+// PowerUpDefinition defines the properties of a power-up.
+type PowerUpDefinition struct {
+	ID          string
+	Title       string
+	Description string
+}
+
+var availablePowerUps = []PowerUpDefinition{
+	{"PUP001", "Speed Boost", "Slightly increases player movement speed."},
+	{"PUP002", "Attack Speed Up", "Player attacks slightly faster."},
+	{"PUP003", "Increased XP Gain", "Gain more XP from orbs."},
+	{"PUP004", "Larger Attack Radius", "Pulse attack maximum radius increased."},
+	{"PUP005", "Extra Health", "Increases Max Health by a small amount."},
+}
 
 // Game implements ebiten.Game interface.
 type Game struct {
-	player              *Player
-	enemies             []*Enemy
-	pulseAttacks        []*PulseAttack
-	attackTimer         float64 // Seconds
-	spawnTimer          float64 // Seconds
-	score               int
-	enemySpawnRate      float64 // Seconds between enemy spawns
-	enemiesPerWave      int
-	camX, camY          float64
-	obstacles           []*Obstacle
-	xpOrbs              []*XPOrb // Slice to hold active XP orbs
-	levelUpMessageTimer float64  // For displaying "LEVEL UP!" message
+	player                   *Player
+	enemies                  []*Enemy
+	pulseAttacks             []*PulseAttack
+	attackTimer              float64 // Seconds
+	spawnTimer               float64 // Seconds
+	score                    int
+	enemySpawnRate           float64 // Seconds between enemy spawns
+	enemiesPerWave           int
+	camX, camY               float64
+	obstacles                []*Obstacle
+	xpOrbs                   []*XPOrb // Slice to hold active XP orbs
+	// levelUpMessageTimer      float64  // No longer used, state transition handles level up UI
 
-	currentState        GameState
-	titleSelectedOption int // 0 for Start, 1 for Quit
-	loseSelectedOption  int // 0 for Retry, 1 for Main Menu
+	currentState             GameState
+	titleSelectedOption      int // 0 for Start, 1 for Quit
+	loseSelectedOption       int // 0 for Retry, 1 for Main Menu
+	levelUpSelectedCardIndex int // 0 or 1 for the two choices
+	currentPowerUpChoices    [2]*PowerUpDefinition
 }
 
 // XPOrb represents an experience point orb dropped by enemies.
@@ -89,6 +120,7 @@ type Player struct {
 	CurrentHealth   int
 	MaxHealth       int
 	invulnerabilityTimer float64 // Seconds
+	AcquiredPowerUps []string // Stores IDs of acquired power-ups
 }
 
 // Enemy represents an enemy character.
@@ -185,10 +217,12 @@ func NewGame() *Game {
 		enemiesPerWave: defaultEnemiesPerWave,
 		obstacles:      []*Obstacle{},
 		xpOrbs:         []*XPOrb{},
-		levelUpMessageTimer: 0,
+		// levelUpMessageTimer: 0, // Removed
 		currentState:        StateTitleScreen,
 		titleSelectedOption: 0, // Default to "Start Game"
 		loseSelectedOption:  0, // Default to "Retry"
+		levelUpSelectedCardIndex: 0,
+		currentPowerUpChoices: [2]*PowerUpDefinition{nil, nil}, // Initialize with nils
 	}
 	// Initialize camera to center on player
 	g.camX = g.player.X - screenWidth/2
@@ -225,6 +259,7 @@ func (g *Game) reset() {
 	g.player.MaxHealth = playerMaxHealth
 	g.player.CurrentHealth = playerMaxHealth
 	g.player.invulnerabilityTimer = 0
+	g.player.AcquiredPowerUps = []string{} // Clear acquired power-ups
 
 	// Center camera on player
 	g.camX = g.player.X - screenWidth/2
@@ -241,7 +276,7 @@ func (g *Game) reset() {
 	g.spawnTimer = 0 // Reset spawn timer to allow immediate first wave on reset
 	g.score = 0
 	// g.gameOver = false // No longer needed here, state transitions handle flow
-	g.levelUpMessageTimer = 0 // Reset level up message timer
+	// g.levelUpMessageTimer = 0 // Removed
 
 	// Reset wave progression if it was dynamic (using defaults here)
 	g.enemySpawnRate = defaultEnemySpawnRate
@@ -256,6 +291,8 @@ func (g *Game) Update() error {
 		g.updateTitleScreen()
 	case StateGameplay:
 		g.updateGameplayScreen()
+	case StateLevelUpSelection:
+		g.updateLevelUpSelectionScreen()
 	case StateLoseScreen:
 		g.updateLoseScreen()
 	}
@@ -600,16 +637,22 @@ func (g *Game) updateGameplayScreen() {
 		g.player.CurrentXP -= g.player.XPToNextLevel // Subtract cost of current level, carry over excess
 		g.player.XPToNextLevel = calculateXPForLevel(g.player.Level)
 		log.Printf("Player reached Level %d! Next level in %d XP.", g.player.Level, g.player.XPToNextLevel)
-		g.levelUpMessageTimer = levelUpMessageDuration // Display "LEVEL UP!" message
+
+		g.prepareLevelUpChoices()
+		g.currentState = StateLevelUpSelection
+		// No need to decrement levelUpMessageTimer here as we are transitioning state.
+		// The old on-screen "LEVEL UP!" message is replaced by the selection screen.
+		return // Exit updateGameplayScreen to prevent further game logic this frame
 	}
 
 	// Decrement Timers
-	if g.levelUpMessageTimer > 0 {
-		g.levelUpMessageTimer -= 1.0 / float64(ebiten.TPS())
-		if g.levelUpMessageTimer < 0 {
-			g.levelUpMessageTimer = 0
-		}
-	}
+	// The g.levelUpMessageTimer is now vestigial and its logic/field can be removed.
+	// if g.levelUpMessageTimer > 0 {
+	// 	g.levelUpMessageTimer -= 1.0 / float64(ebiten.TPS())
+	// 	if g.levelUpMessageTimer < 0 {
+	// 		g.levelUpMessageTimer = 0
+	// 	}
+	// }
 	if g.player.invulnerabilityTimer > 0 {
 		g.player.invulnerabilityTimer -= 1.0 / float64(ebiten.TPS())
 		if g.player.invulnerabilityTimer < 0 {
@@ -655,6 +698,106 @@ func (g *Game) updateGameplayScreen() {
 	// } // This was the end of the old 'if !g.gameOver' block, now removed.
 } // This is the correct end of updateGameplayScreen()
 
+func (g *Game) updateLevelUpSelectionScreen() {
+	// Use constants for card dimensions for consistency with drawing
+	totalLayoutWidth := levelUpCardWidth*2 + levelUpCardSpacing // Total width taken by two cards and spacing
+
+	startX := (float64(screenWidth) - totalLayoutWidth) / 2 // Starting X for the first card
+	cardY := (float64(screenHeight) - levelUpCardHeight) / 2 // Y position for both cards (top edge)
+
+	card1Rect := image.Rect(
+		int(startX),
+		int(cardY),
+		int(startX+levelUpCardWidth),
+		int(cardY+levelUpCardHeight),
+	)
+	card2X := startX + levelUpCardWidth + levelUpCardSpacing
+	card2Rect := image.Rect(
+		int(card2X),
+		int(cardY),
+		int(card2X+levelUpCardWidth),
+		int(cardY+levelUpCardHeight),
+	)
+
+	// Mouse Hover Logic
+	mx, my := ebiten.CursorPosition()
+	mousePoint := image.Point{X: mx, Y: my}
+
+	if mousePoint.In(card1Rect) {
+		g.levelUpSelectedCardIndex = 0
+	} else if mousePoint.In(card2Rect) {
+		g.levelUpSelectedCardIndex = 1
+	}
+
+	// Keyboard selection (Left/Right or A/D)
+	if inpututil.IsKeyJustPressed(ebiten.KeyLeft) || inpututil.IsKeyJustPressed(ebiten.KeyA) {
+		g.levelUpSelectedCardIndex--
+		if g.levelUpSelectedCardIndex < 0 {
+			g.levelUpSelectedCardIndex = 1 // Wrap
+		}
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyRight) || inpututil.IsKeyJustPressed(ebiten.KeyD) {
+		g.levelUpSelectedCardIndex++
+		if g.levelUpSelectedCardIndex > 1 {
+			g.levelUpSelectedCardIndex = 0 // Wrap
+		}
+	}
+
+	// Confirm selection
+	confirmed := false
+	if inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeySpace) {
+		confirmed = true
+	}
+	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+		// Check if click was on the currently selected card index (which might have been updated by hover)
+		if (g.levelUpSelectedCardIndex == 0 && mousePoint.In(card1Rect)) || (g.levelUpSelectedCardIndex == 1 && mousePoint.In(card2Rect)) {
+			confirmed = true
+		}
+	}
+
+	if confirmed {
+		chosenPowerUp := g.currentPowerUpChoices[g.levelUpSelectedCardIndex]
+		if chosenPowerUp != nil {
+			log.Printf("Player selected Power-Up: %s (ID: %s)", chosenPowerUp.Title, chosenPowerUp.ID)
+			g.player.AcquiredPowerUps = append(g.player.AcquiredPowerUps, chosenPowerUp.ID)
+		}
+		g.currentState = StateGameplay // Resume gameplay
+	}
+}
+
+// prepareLevelUpChoices selects two distinct power-ups to offer the player.
+func (g *Game) prepareLevelUpChoices() {
+	if len(availablePowerUps) < 2 {
+		// Handle cases where not enough unique power-ups are available
+		// For now, this basic version might offer duplicates or nil if fewer than 2.
+		// A more robust version would filter out already acquired one-time power-ups
+		// or ensure variety.
+		if len(availablePowerUps) == 1 {
+			g.currentPowerUpChoices[0] = &availablePowerUps[0]
+			g.currentPowerUpChoices[1] = nil // Or a generic choice like "Minor XP Boost"
+		} else if len(availablePowerUps) == 0 {
+			g.currentPowerUpChoices[0] = nil
+			g.currentPowerUpChoices[1] = nil
+		}
+		g.levelUpSelectedCardIndex = 0
+		return
+	}
+
+	// Shuffle availablePowerUps to get random choices
+	// Create a copy to shuffle if you don't want to alter the original slice order permanently
+	shuffledChoices := make([]PowerUpDefinition, len(availablePowerUps))
+	copy(shuffledChoices, availablePowerUps)
+
+	rand.Shuffle(len(shuffledChoices), func(i, j int) {
+		shuffledChoices[i], shuffledChoices[j] = shuffledChoices[j], shuffledChoices[i]
+	})
+
+	g.currentPowerUpChoices[0] = &shuffledChoices[0]
+	g.currentPowerUpChoices[1] = &shuffledChoices[1]
+
+	g.levelUpSelectedCardIndex = 0 // Default to selecting the first card
+}
+
 func (g *Game) updateLoseScreen() {
 	if inpututil.IsKeyJustPressed(ebiten.KeyUp) {
 		g.loseSelectedOption--
@@ -690,10 +833,111 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		g.drawTitleScreen(screen)
 	case StateGameplay:
 		g.drawGameplayScreen(screen)
+	case StateLevelUpSelection:
+		g.drawLevelUpSelectionScreen(screen)
 	case StateLoseScreen:
 		g.drawLoseScreen(screen)
 	}
 }
+
+func (g *Game) drawLevelUpSelectionScreen(screen *ebiten.Image) {
+	// 1. Draw paused gameplay screen as background
+	g.drawGameplayScreen(screen)
+
+	// 2. Draw a semi-transparent overlay to dim the background
+	overlayColor := color.NRGBA{R: 0, G: 0, B: 0, A: 180} // Dark semi-transparent
+	ebitenutil.DrawRect(screen, 0, 0, float64(screenWidth), float64(screenHeight), overlayColor)
+
+	// 3. Define card positions and dimensions (consistent with updateLevelUpSelectionScreen)
+	totalLayoutWidth := levelUpCardWidth*2 + levelUpCardSpacing
+	startX := (float64(screenWidth) - totalLayoutWidth) / 2
+	cardY := (float64(screenHeight) - levelUpCardHeight) / 2
+
+	cardPositions := [2][2]float64{
+		{startX, cardY},
+		{startX + levelUpCardWidth + levelUpCardSpacing, cardY},
+	}
+
+	// 4. Draw the two power-up cards
+	for i, choice := range g.currentPowerUpChoices {
+		if choice == nil {
+			// Optionally draw an empty card slot or skip
+			// For now, draw a slightly different background if choice is nil
+			cardPosX := cardPositions[i][0]
+			cardPosY := cardPositions[i][1]
+			emptyCardBgColor := color.NRGBA{R: 30, G: 30, B: 40, A: 200}
+			ebitenutil.DrawRect(screen, cardPosX, cardPosY, levelUpCardWidth, levelUpCardHeight, emptyCardBgColor)
+			ebitenutil.DebugPrintAt(screen, "[No Option]", int(cardPosX+levelUpCardPadding), int(cardPosY+levelUpCardHeight/2))
+			continue
+		}
+
+		cardPosX := cardPositions[i][0]
+		cardPosY := cardPositions[i][1]
+
+		cardBgColor := color.NRGBA{R: 40, G: 40, B: 60, A: 230} // Card background
+		if i == g.levelUpSelectedCardIndex {
+			cardBgColor = color.NRGBA{R: 60, G: 60, B: 90, A: 255} // Selected card brighter
+		}
+		ebitenutil.DrawRect(screen, cardPosX, cardPosY, levelUpCardWidth, levelUpCardHeight, cardBgColor)
+
+		// Card border for selected
+		if i == g.levelUpSelectedCardIndex {
+			borderColor := color.NRGBA{R: 180, G: 180, B: 255, A: 255} // Light highlight border
+			ebitenutil.DrawRect(screen, cardPosX-2, cardPosY-2, levelUpCardWidth+4, 2, borderColor) // Top
+			ebitenutil.DrawRect(screen, cardPosX-2, cardPosY+levelUpCardHeight, levelUpCardWidth+4, 2, borderColor) // Bottom
+			ebitenutil.DrawRect(screen, cardPosX-2, cardPosY, 2, levelUpCardHeight, borderColor) // Left
+			ebitenutil.DrawRect(screen, cardPosX+levelUpCardWidth, cardPosY, 2, levelUpCardHeight, borderColor) // Right
+		}
+
+		titleX := int(cardPosX + levelUpCardPadding)
+		titleY := int(cardPosY + levelUpTitleOffsetY)
+		ebitenutil.DebugPrintAt(screen, choice.Title, titleX, titleY)
+
+		descY := int(cardPosY + levelUpDescOffsetY)
+		wrappedDesc := g.wrapText(choice.Description, int(levelUpCardWidth-2*levelUpCardPadding)/6) // Approx chars per line
+		for j, line := range wrappedDesc {
+			ebitenutil.DebugPrintAt(screen, line, titleX, descY+(j*15))
+		}
+	}
+
+	// 5. Draw prompt text
+	promptText := "Choose an Upgrade! (Arrows/Mouse, Enter/Click)"
+	promptTextPixelWidth := len(promptText) * 6
+	promptX := (screenWidth - promptTextPixelWidth) / 2
+	promptY := int(cardY + levelUpCardHeight + levelUpCardSpacing + 10)
+	if promptY > screenHeight - 30 { // Ensure it's on screen
+		promptY = screenHeight - 30
+	}
+	ebitenutil.DebugPrintAt(screen, promptText, promptX, promptY)
+}
+
+
+// wrapText is a helper function to break a long string into lines of roughly maxLength characters.
+func (g *Game) wrapText(text string, maxCharsPerLine int) []string {
+	var lines []string
+	var currentLine string
+	words := strings.Fields(text)
+
+	if len(words) == 0 {
+		return []string{text} // Return original text if no words (e.g. empty or all spaces)
+	}
+
+	for _, word := range words {
+		if len(currentLine) == 0 {
+			currentLine = word
+		} else if len(currentLine)+len(word)+1 <= maxCharsPerLine {
+			currentLine += " " + word
+		} else {
+			lines = append(lines, currentLine)
+			currentLine = word
+		}
+	}
+	if len(currentLine) > 0 {
+		lines = append(lines, currentLine)
+	}
+	return lines
+}
+
 
 func (g *Game) drawTitleScreen(screen *ebiten.Image) {
 	screen.Fill(color.NRGBA{R: 20, G: 20, B: 40, A: 255}) // Dark blue background for title
@@ -904,15 +1148,7 @@ func (g *Game) drawGameplayScreen(screen *ebiten.Image) {
 	// Display Score
 	scoreText := "Score: " + strconv.Itoa(g.score)
 	ebitenutil.DebugPrintAt(screen, scoreText, screenWidth-150, xpBarY+xpBarHeight+5) // Near top right
-
-	// Display "LEVEL UP!" message
-	if g.levelUpMessageTimer > 0 {
-		levelUpText := "LEVEL UP!"
-		// For "large text" with DebugPrint, we can't scale. We just center it.
-		// True large text would require loading fonts and using text.Draw.
-		textWidth := len(levelUpText) * 6 // Approximate width for DebugPrint characters
-		ebitenutil.DebugPrintAt(screen, levelUpText, screenWidth/2-textWidth/2, screenHeight/2-10)
-	}
+	// The old "LEVEL UP!" message display is removed as level up now transitions to a new state.
 }
 
 func (g *Game) drawLoseScreen(screen *ebiten.Image) {
