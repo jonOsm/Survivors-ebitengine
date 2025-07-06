@@ -74,8 +74,8 @@ type PulseAttack struct {
 
 const (
 	pulseAttackCooldown       = 1.0 // seconds
-	pulseAttackMaxRadius      = 16  // Player is 16px, so diameter is 16. Twice diameter is 32. MaxRadius is half of that.
-	pulseAttackExpansionSpeed = 40  // pixels per second. Adjusted for smaller radius.
+	pulseAttackMaxRadius      = 32  // Player diameter 16px. 4x is 64px diameter. MaxRadius is half of that.
+	pulseAttackExpansionSpeed = 40  // pixels per second.
 	pulseRingThickness        = 4   // Thickness of the pulse ring in pixels.
 )
 
@@ -123,11 +123,33 @@ func NewGame() *Game {
 	return g
 }
 
+// reset re-initializes the game state to its starting conditions.
+func (g *Game) reset() {
+	g.player.X = screenWidth / 2
+	g.player.Y = screenHeight / 2
+	// Player speed and collision radius remain the same.
+
+	g.enemies = []*Enemy{}      // Clear enemies
+	g.pulseAttacks = []*PulseAttack{} // Clear attacks
+
+	g.attackTimer = 0
+	g.spawnTimer = 0 // Reset spawn timer to allow immediate first wave on reset
+	g.score = 0
+	g.gameOver = false // Critical: reset gameOver flag
+
+	// Reset wave progression if it was dynamic (using defaults here)
+	g.enemySpawnRate = defaultEnemySpawnRate
+	g.enemiesPerWave = defaultEnemiesPerWave
+}
+
 // Update proceeds the game state.
 // Update is called every tick (1/60 [s] by default).
 func (g *Game) Update() error {
 	if g.gameOver {
-		return nil // Stop updates if game is over
+		// If game was over, reset it.
+		// This effectively makes the "Game Over" state momentary before reset.
+		g.reset()
+		// No return here, allow the update to proceed for the fresh game state once.
 	}
 
 	// Player movement
