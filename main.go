@@ -72,6 +72,9 @@ type Player struct {
 	Level           int
 	CurrentXP       int
 	XPToNextLevel   int
+	CurrentHealth   int
+	MaxHealth       int
+	invulnerabilityTimer float64 // Seconds
 }
 
 // Enemy represents an enemy character.
@@ -109,6 +112,9 @@ const (
 	xpOrbValue                = 25  // XP gained per orb
 	xpOrbCollisionRadius      = 15   // For collecting XP orbs (increased from 5; image is 10x10)
 	levelUpMessageDuration    = 2.0 // seconds
+	playerMaxHealth           = 100
+	enemyContactDamage        = 10
+	playerHitInvulnerabilityDuration = 0.75 // seconds
 )
 
 func init() {
@@ -151,6 +157,9 @@ func NewGame() *Game {
 			Level:           0,
 			CurrentXP:       0,
 			XPToNextLevel:   calculateXPForLevel(0),
+			MaxHealth:       playerMaxHealth,
+			CurrentHealth:   playerMaxHealth,
+			invulnerabilityTimer: 0,
 		},
 		enemies:        []*Enemy{},
 		pulseAttacks:   []*PulseAttack{},
@@ -196,6 +205,9 @@ func (g *Game) reset() {
 	g.player.Level = 0
 	g.player.CurrentXP = 0
 	g.player.XPToNextLevel = calculateXPForLevel(0)
+	g.player.MaxHealth = playerMaxHealth
+	g.player.CurrentHealth = playerMaxHealth
+	g.player.invulnerabilityTimer = 0
 
 	// Center camera on player
 	g.camX = g.player.X - screenWidth/2
@@ -506,8 +518,15 @@ func (g *Game) Update() error {
 		if enemy.Health > 0 { // Only living enemies can collide.
 			dist := distance(g.player.X, g.player.Y, enemy.X, enemy.Y)
 			if dist < g.player.CollisionRadius+enemy.CollisionRadius {
-				g.gameOver = true
-				break
+				if g.player.invulnerabilityTimer <= 0 {
+					g.player.CurrentHealth -= enemyContactDamage
+					g.player.invulnerabilityTimer = playerHitInvulnerabilityDuration
+					// Death check will happen separately after all updates for the frame
+				}
+				// No break here, as multiple enemies could hit in theory, though invulnerability handles it.
+				// However, if an enemy hits, it's usually one interaction per frame of collision logic.
+				// For simplicity, one hit processing per frame of collision loop is fine.
+				// If player dies from this hit, gameOver will be set later.
 			}
 		}
 	}
@@ -534,12 +553,24 @@ func (g *Game) Update() error {
 		g.levelUpMessageTimer = levelUpMessageDuration // Display "LEVEL UP!" message
 	}
 
-	// Decrement level up message timer
+	// Decrement Timers
 	if g.levelUpMessageTimer > 0 {
 		g.levelUpMessageTimer -= 1.0 / float64(ebiten.TPS())
 		if g.levelUpMessageTimer < 0 {
 			g.levelUpMessageTimer = 0
 		}
+	}
+	if g.player.invulnerabilityTimer > 0 {
+		g.player.invulnerabilityTimer -= 1.0 / float64(ebiten.TPS())
+		if g.player.invulnerabilityTimer < 0 {
+			g.player.invulnerabilityTimer = 0
+		}
+	}
+
+	// Player Death Check
+	if g.player.CurrentHealth <= 0 {
+		g.gameOver = true
+		// Game reset will be handled at the start of the next Update cycle.
 	}
 
 	// Entity Cleanup: Remove "dead" entities (if game is not over).
@@ -603,6 +634,15 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		opts.GeoM.Translate(g.player.X, g.player.Y)
 		// Apply camera view
 		opts.GeoM.Translate(-g.camX, -g.camY)
+
+		// Player invulnerability visual feedback (flashing)
+		if g.player.invulnerabilityTimer > 0 {
+			// Blink effect: alternate alpha rapidly
+			// Check if the fractional part of timer*5 (e.g., every 0.2s cycle for timer*5) is in the "off" phase
+			if math.Mod(g.player.invulnerabilityTimer*10, 2) > 1 { // Blink rapidly
+				opts.ColorScale.ScaleAlpha(0.5) // Make player semi-transparent
+			}
+		}
 		screen.DrawImage(g.player.Image, opts)
 	}
 
@@ -682,6 +722,25 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	// Draw Level Text
 	levelText := "Level: " + strconv.Itoa(g.player.Level)
 	ebitenutil.DebugPrintAt(screen, levelText, xpBarX, xpBarY+xpBarHeight+5)
+
+	// Draw Health Bar (below XP Bar)
+	healthBarWidth := screenWidth - 40 // Same width as XP bar
+	healthBarHeight := 15 // Slightly slimmer than XP bar
+	healthBarX := xpBarX
+	healthBarY := xpBarY + xpBarHeight + 10 // Positioned below XP bar with a small gap
+
+	// Background of Health bar
+	ebitenutil.DrawRect(screen, float64(healthBarX), float64(healthBarY), float64(healthBarWidth), float64(healthBarHeight), color.Gray{Y: 50})
+
+	// Foreground of Health bar (current health)
+	healthRatio := 0.0
+	if g.player.MaxHealth > 0 {
+		healthRatio = float64(g.player.CurrentHealth) / float64(g.player.MaxHealth)
+	}
+	currentHealthWidth := healthRatio * float64(healthBarWidth)
+	// Ensure width is not negative if health is somehow negative before death check
+	if currentHealthWidth < 0 { currentHealthWidth = 0 }
+	ebitenutil.DrawRect(screen, float64(healthBarX), float64(healthBarY), currentHealthWidth, float64(healthBarHeight), color.RGBA{R: 220, G: 50, B: 50, A: 255}) // Reddish
 
 	// Display Score and Game Over Message
 	scoreText := "Score: " + strconv.Itoa(g.score)
