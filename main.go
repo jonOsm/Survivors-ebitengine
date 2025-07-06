@@ -73,7 +73,7 @@ var availablePowerUps = []PowerUpDefinition{
 	{"PUP005", "Extra Health", "Increases Max Health by a small amount."},
 	{"PUP006", "Magic Missile", "Fires a homing missile every 2s that weaves and deals 2 damage."},
 	{"PUP007", "Twin Barrage", "Magic Missile fires an additional projectile."},
-	{"PUP008", "Phantom Edge", "Magic Missile pierces 1 additional enemy."},
+	{"PUP008", "Phantom Edge", "Magic Missile pierces 1 additional enemy."}, // Restored
 }
 
 // MagicMissile represents a homing, weaving projectile.
@@ -86,9 +86,9 @@ type MagicMissile struct {
 	timeAlive      float64 // For weaving pattern and lifetime
 	Image          *ebiten.Image
 	ToRemove       bool
-	MaxPierces     int // Max number of enemies this missile can pierce
-	PiercesMade    int // How many enemies this missile has pierced so far
-	hitTargets     map[*Enemy]bool // Tracks enemies already hit by this specific missile instance to avoid re-hitting in a pierce chain
+	MaxPierces     int             // Max number of enemies this missile can pierce (restored)
+	PiercesMade    int             // How many enemies this missile has pierced so far (restored)
+	hitTargets     map[*Enemy]bool // Tracks enemies already hit by this specific missile instance (restored)
 }
 
 // Game implements ebiten.Game interface.
@@ -155,7 +155,7 @@ type Player struct {
 	HasMagicMissile         bool
 	magicMissileFireTimer   float64 // Cooldown timer for firing missiles
 	MagicMissileCount       int     // Number of missiles to fire at once
-	MagicMissilePiercing    int     // How many additional targets missiles can pierce
+	MagicMissilePiercing    int     // How many additional targets missiles can pierce (restored)
 }
 
 // Enemy represents an enemy character.
@@ -264,7 +264,7 @@ func NewGame() *Game {
 			HasMagicMissile: false,
 			magicMissileFireTimer: 0,
 			MagicMissileCount:    0, // Will be set to 1 when PUP006 is acquired
-			MagicMissilePiercing: 0,
+			MagicMissilePiercing: 0, // Restored
 		},
 		enemies:        []*Enemy{},
 		pulseAttacks:   []*PulseAttack{},
@@ -328,7 +328,7 @@ func (g *Game) reset() {
 	g.player.HasMagicMissile = false
 	g.player.magicMissileFireTimer = 0
 	g.player.MagicMissileCount = 0
-	g.player.MagicMissilePiercing = 0
+	g.player.MagicMissilePiercing = 0 // Restored
 
 
 	// Center camera on player
@@ -795,25 +795,30 @@ func (g *Game) updateGameplayScreen() {
 			continue
 		}
 
-		if m.TargetEnemy == nil || m.TargetEnemy.Health <= 0 {
-			// Target lost or dead, missile could continue straight or dissipate
-			// For now, let it dissipate (mark for removal)
-			m.ToRemove = true
-			continue
+		// Target Loss Logic (Adjusted for Pierce)
+		if m.TargetEnemy != nil && m.TargetEnemy.Health <= 0 { // Target died
+			m.TargetEnemy = nil // Stop homing, missile will fly straight
+			// If it couldn't pierce (MaxPierces = 0), it might have been removed on hit already.
+			// If it *can* pierce, it continues straight and relies on opportunistic pierce or lifetime.
 		}
+		// Note: if m.TargetEnemy was nil initially (e.g. directional shot), it remains nil.
 
 		// Homing and Weaving Movement
-		targetX, targetY := m.TargetEnemy.X, m.TargetEnemy.Y
-		dirToTargetX, dirToTargetY := normalizeVector(targetX-m.X, targetY-m.Y)
+		var dirToTargetX, dirToTargetY float64
+		if m.TargetEnemy != nil { // Only home if there's a live target
+			targetX, targetY := m.TargetEnemy.X, m.TargetEnemy.Y
+			dirToTargetX, dirToTargetY = normalizeVector(targetX-m.X, targetY-m.Y)
+			m.CurrentAngle = math.Atan2(dirToTargetY, dirToTargetX) // Update angle towards target
+		} else {
+			// No target, fly straight using current angle (set at launch or last known target direction)
+			dirToTargetX = math.Cos(m.CurrentAngle)
+			dirToTargetY = math.Sin(m.CurrentAngle)
+		}
 
-		// Update current angle for drawing rotation
-		m.CurrentAngle = math.Atan2(dirToTargetY, dirToTargetX)
-
-		// Weaving: perpendicular oscillation
-		// Sideways vector: (-dirToTargetY, dirToTargetX)
+		// Weaving is always applied relative to the (potentially straight) direction
 		oscillationFactor := math.Sin(m.timeAlive*magicMissileWeaveFrequency) * magicMissileWeaveMagnitude
-		weaveDX := -dirToTargetY * oscillationFactor
-		weaveDY := dirToTargetX * oscillationFactor
+		weaveDX := -dirToTargetY * oscillationFactor // Perpendicular to current direction
+		weaveDY := dirToTargetX * oscillationFactor  // Perpendicular to current direction
 
 		// Final velocity components
 		vx := (dirToTargetX*m.Speed + weaveDX) / float64(ebiten.TPS())
@@ -822,45 +827,57 @@ func (g *Game) updateGameplayScreen() {
 		m.X += vx
 		m.Y += vy
 
-		// Collision with TargetEnemy
+		// Collision with TargetEnemy (and other enemies if piercing)
 		distToTargetSq := math.Pow(m.TargetEnemy.X-m.X, 2) + math.Pow(m.TargetEnemy.Y-m.Y, 2)
 		// Missile radius is small (e.g. image size / 2), enemy radius is enemyCollisionRadius
 		missileRadius := float64(m.Image.Bounds().Dx()) / 2
-		if distToTargetSq < math.Pow(missileRadius+m.TargetEnemy.CollisionRadius, 2) {
-			if _, alreadyHit := m.hitTargets[m.TargetEnemy]; !alreadyHit { // Check if this specific missile already hit this target
+
+		// Check collision with any nearby enemy, not just m.TargetEnemy, if it's flying straight after target loss.
+		// However, for simplicity with homing, primary collision check is with m.TargetEnemy.
+		// If piercing allows hitting others, this loop needs to be broader or missiles need their own small detection radius.
+		// For now, stick to collision with m.TargetEnemy for pierce chain initiation.
+		// A more general pierce would iterate all enemies here.
+
+		if m.TargetEnemy != nil && m.TargetEnemy.Health > 0 && // Ensure target is still valid for collision check
+		   distToTargetSq < math.Pow(missileRadius+m.TargetEnemy.CollisionRadius, 2) {
+
+			if _, alreadyHit := m.hitTargets[m.TargetEnemy]; !alreadyHit {
 				m.TargetEnemy.Health -= m.Damage
-				m.hitTargets[m.TargetEnemy] = true // Mark as hit by this missile instance
+				m.hitTargets[m.TargetEnemy] = true
 				m.PiercesMade++
 
 				if m.PiercesMade > m.MaxPierces {
 					m.ToRemove = true
 				} else {
-					// Re-target for pierce
-					var nextTarget *Enemy
-					minDistSqForNext := math.MaxFloat64
-					// Find new closest enemy not already hit by this missile
-					for _, potentialNextTarget := range g.enemies {
-						if potentialNextTarget.Health > 0 {
-							if _, ok := m.hitTargets[potentialNextTarget]; !ok { // Not already hit by this missile
-								distSq := math.Pow(potentialNextTarget.X-m.X, 2) + math.Pow(potentialNextTarget.Y-m.Y, 2)
-								// Optional: Check if within a certain re-targeting range from current missile pos
-								if distSq < minDistSqForNext {
-									minDistSqForNext = distSq
-									nextTarget = potentialNextTarget
-								}
+					// Missile continues. If TargetEnemy died from this hit, it will fly straight.
+					// No explicit re-targeting to a *new* different enemy.
+					// It will continue to home on original TargetEnemy if it's still alive.
+					// Or fly straight if TargetEnemy died (handled by TargetLoss check at start of loop).
+				}
+			}
+		}
+		// If missile has no target (e.g., original target died and it's flying straight)
+		// it could collide with other enemies. This requires a broader collision check.
+		// For now, we only check collision with the *current* m.TargetEnemy.
+		// This means pierce will only effectively work if multiple enemies are super close to the original target OR if the missile path naturally intersects others.
+		// A simple extension for "dumb" pierce: iterate all enemies.
+		if !m.ToRemove && m.PiercesMade <= m.MaxPierces { // Only if it can still pierce and hasn't been removed
+			for _, enemy := range g.enemies {
+				if enemy.Health > 0 {
+					if _, alreadyHit := m.hitTargets[enemy]; !alreadyHit { // Hasn't hit *this* enemy yet
+						distSqToOther := math.Pow(enemy.X-m.X, 2) + math.Pow(enemy.Y-m.Y, 2)
+						if distSqToOther < math.Pow(missileRadius+enemy.CollisionRadius, 2) {
+							enemy.Health -= m.Damage
+							m.hitTargets[enemy] = true
+							m.PiercesMade++
+							if m.PiercesMade > m.MaxPierces {
+								m.ToRemove = true
+								break // Stop checking other enemies for this missile
 							}
+							// Continues, no re-targeting
 						}
 					}
-					if nextTarget != nil {
-						m.TargetEnemy = nextTarget // Switch target
-					} else {
-						m.ToRemove = true // No more valid targets to pierce
-					}
 				}
-			} else {
-				// Already hit this target with this missile, do nothing (should ideally not happen if target switches quick)
-				// Or, if it's stuck on a target it already pierced, could mark ToRemove.
-				// For now, this implies it passed through and is continuing.
 			}
 		}
 	}
@@ -934,9 +951,9 @@ func (g *Game) updateGameplayScreen() {
 					timeAlive:    0,
 					Image:        magicMissileImage,
 					ToRemove:     false,
-					MaxPierces:   g.player.MagicMissilePiercing,
-					PiercesMade:  0,
-					hitTargets:   make(map[*Enemy]bool),
+					MaxPierces:   g.player.MagicMissilePiercing, // Restored
+					PiercesMade:  0,                             // Restored
+					hitTargets:   make(map[*Enemy]bool),         // Restored
 				}
 				g.magicMissiles = append(g.magicMissiles, newMissile)
 				firedMissiles++
@@ -1070,8 +1087,8 @@ func (g *Game) updateLevelUpSelectionScreen() {
 					g.player.MagicMissileCount = 2 // Gets base + this one
 					g.player.magicMissileFireTimer = magicMissileCooldown
 				}
-			case "PUP008": // Phantom Edge (Piercing)
-				g.player.MagicMissilePiercing++ // Each selection adds +1 pierce
+			case "PUP008": // Phantom Edge (Piercing) - Restored
+				g.player.MagicMissilePiercing++
 			}
 		}
 		g.currentState = StateGameplay // Resume gameplay
