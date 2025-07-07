@@ -176,6 +176,7 @@ type Enemy struct {
 	Image *ebiten.Image
 	CollisionRadius float64
 	Type            EnemyTypeID
+	ProcessedDeath  bool // To ensure death rewards (XP, score) are given only once
 }
 
 const (
@@ -342,7 +343,34 @@ func NewEnemy(eType EnemyTypeID, x, y float64) *Enemy {
 		enemy.CollisionRadius = enemyCollisionRadius
 		log.Printf("Warning: Unknown enemy type %d created, defaulting to standard.", eType)
 	}
+	enemy.ProcessedDeath = false // Initialize ProcessedDeath flag
 	return enemy
+}
+
+func (g *Game) handleEnemyDeath(e *Enemy) {
+	if e.ProcessedDeath {
+		return // Already processed
+	}
+	e.ProcessedDeath = true
+
+	// Award score (customize per enemy type if needed later)
+	scoreValue := 10
+	if e.Type == EnemyTypeBrute {
+		scoreValue = 50 // Brutes give more score
+	}
+	g.score += scoreValue
+
+	// Spawn an XP Orb
+	orb := &XPOrb{
+		X:               e.X,
+		Y:               e.Y,
+		Value:           xpOrbValue, // Standard XP value for now, could also vary by enemy type
+		Image:           xpOrbImage,
+		CollisionRadius: xpOrbCollisionRadius,
+		Collected:       false,
+	}
+	g.xpOrbs = append(g.xpOrbs, orb)
+	log.Printf("Enemy died at (%.1f, %.1f), type: %d. Score: %d. XP orb spawned.", e.X, e.Y, e.Type, g.score)
 }
 
 
@@ -709,21 +737,10 @@ func (g *Game) updateGameplayScreen() {
 					// Collision occurs if the distance between the attack's center and the enemy's center
 					// is less than the sum of the attack's current radius and the enemy's collision radius.
 					if dist <= attack.Radius+enemy.CollisionRadius {
+						oldHealth := enemy.Health
 						enemy.Health-- // Damage the enemy.
-						if enemy.Health <= 0 {
-							g.score += 10 // Award score for defeating an enemy.
-
-							// Spawn an XP Orb
-							orb := &XPOrb{
-								X:               enemy.X,
-								Y:               enemy.Y,
-								Value:           xpOrbValue,
-								Image:           xpOrbImage,
-								CollisionRadius: xpOrbCollisionRadius,
-								Collected:       false,
-							}
-							g.xpOrbs = append(g.xpOrbs, orb)
-							// The enemy will be removed from the game in the cleanup phase.
+						if oldHealth > 0 && enemy.Health <= 0 {
+							g.handleEnemyDeath(enemy)
 						}
 					}
 				}
@@ -853,28 +870,27 @@ func (g *Game) updateGameplayScreen() {
 			continue
 		}
 
-		// Robust Target Validation
+		// Robust Target Validation: Ensure m.TargetEnemy is valid before any use.
 		if m.TargetEnemy != nil {
-			isTargetStillInGame := false
-			for _, gameEnemy := range g.enemies {
-				if m.TargetEnemy == gameEnemy { // Pointer comparison
-					isTargetStillInGame = true
-					if gameEnemy.Health <= 0 { // Target is in game list but dead
-						m.TargetEnemy = nil
+			foundAndAlive := false
+			for _, e := range g.enemies { // Check against the current live enemy list
+				if e == m.TargetEnemy { // Pointer comparison
+					if e.Health > 0 {
+						foundAndAlive = true
 					}
 					break
 				}
 			}
-			if !isTargetStillInGame { // Target pointer no longer in the main enemies list
-				m.TargetEnemy = nil
+			if !foundAndAlive {
+				m.TargetEnemy = nil // Target is gone or dead
 			}
 		}
-		// At this point, m.TargetEnemy is either nil or points to an enemy in g.enemies with Health > 0 (implicitly, because dead ones would have been nilled above)
+		// Now, m.TargetEnemy is either nil or points to a live enemy in g.enemies.
 
 		// Homing and Weaving Movement
 		var dirToTargetX, dirToTargetY float64
 		if m.TargetEnemy != nil { // This check should now be very safe
-			targetX, targetY := m.TargetEnemy.X, m.TargetEnemy.Y // Line 886 (or near)
+			targetX, targetY := m.TargetEnemy.X, m.TargetEnemy.Y
 			dirToTargetX, dirToTargetY = normalizeVector(targetX-m.X, targetY-m.Y)
 			m.CurrentAngle = math.Atan2(dirToTargetY, dirToTargetX) // Update angle towards target
 		} else {
@@ -910,39 +926,42 @@ func (g *Game) updateGameplayScreen() {
 		   distToTargetSq < math.Pow(missileRadius+m.TargetEnemy.CollisionRadius, 2) {
 
 			if _, alreadyHit := m.hitTargets[m.TargetEnemy]; !alreadyHit {
+				oldHealth := m.TargetEnemy.Health
 				m.TargetEnemy.Health -= m.Damage
 				m.hitTargets[m.TargetEnemy] = true
 				m.PiercesMade++
 
+				if oldHealth > 0 && m.TargetEnemy.Health <= 0 {
+					g.handleEnemyDeath(m.TargetEnemy)
+				}
+
 				if m.PiercesMade > m.MaxPierces {
 					m.ToRemove = true
-				} else {
-					// Missile continues. If TargetEnemy died from this hit, it will fly straight.
-					// No explicit re-targeting to a *new* different enemy.
-					// It will continue to home on original TargetEnemy if it's still alive.
-					// Or fly straight if TargetEnemy died (handled by TargetLoss check at start of loop).
 				}
+				// Missile continues if not ToRemove, potentially homing on original target if still alive, or flying straight.
 			}
 		}
-		// If missile has no target (e.g., original target died and it's flying straight)
-		// it could collide with other enemies. This requires a broader collision check.
-		// For now, we only check collision with the *current* m.TargetEnemy.
-		// This means pierce will only effectively work if multiple enemies are super close to the original target OR if the missile path naturally intersects others.
-		// A simple extension for "dumb" pierce: iterate all enemies.
-		if !m.ToRemove && m.PiercesMade <= m.MaxPierces { // Only if it can still pierce and hasn't been removed
-			for _, enemy := range g.enemies {
-				if enemy.Health > 0 {
-					if _, alreadyHit := m.hitTargets[enemy]; !alreadyHit { // Hasn't hit *this* enemy yet
-						distSqToOther := math.Pow(enemy.X-m.X, 2) + math.Pow(enemy.Y-m.Y, 2)
-						if distSqToOther < math.Pow(missileRadius+enemy.CollisionRadius, 2) {
-							enemy.Health -= m.Damage
-							m.hitTargets[enemy] = true
+
+		// Opportunistic Pierce Collision with other enemies
+		if !m.ToRemove && m.PiercesMade <= m.MaxPierces {
+			for _, otherEnemy := range g.enemies {
+				if otherEnemy.Health > 0 { // Can only hit live enemies
+					if _, alreadyHit := m.hitTargets[otherEnemy]; !alreadyHit { // Hasn't hit *this* otherEnemy yet with this missile
+						distSqToOther := math.Pow(otherEnemy.X-m.X, 2) + math.Pow(otherEnemy.Y-m.Y, 2)
+						if distSqToOther < math.Pow(missileRadius+otherEnemy.CollisionRadius, 2) {
+							oldHealth := otherEnemy.Health
+							otherEnemy.Health -= m.Damage
+							m.hitTargets[otherEnemy] = true
 							m.PiercesMade++
+
+							if oldHealth > 0 && otherEnemy.Health <= 0 {
+								g.handleEnemyDeath(otherEnemy)
+							}
+
 							if m.PiercesMade > m.MaxPierces {
 								m.ToRemove = true
-								break // Stop checking other enemies for this missile
+								break // Stop checking other enemies for this missile, it's spent
 							}
-							// Continues, no re-targeting
 						}
 					}
 				}
