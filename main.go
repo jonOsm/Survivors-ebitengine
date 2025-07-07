@@ -840,6 +840,9 @@ func (g *Game) updateGameplayScreen() {
 
 	// Update Magic Missiles
 	for _, m := range g.magicMissiles {
+		if m == nil { // Defensive check for nil missile pointer
+			continue
+		}
 		if m.ToRemove {
 			continue
 		}
@@ -850,18 +853,28 @@ func (g *Game) updateGameplayScreen() {
 			continue
 		}
 
-		// Target Loss Logic (Adjusted for Pierce)
-		if m.TargetEnemy != nil && m.TargetEnemy.Health <= 0 { // Target died
-			m.TargetEnemy = nil // Stop homing, missile will fly straight
-			// If it couldn't pierce (MaxPierces = 0), it might have been removed on hit already.
-			// If it *can* pierce, it continues straight and relies on opportunistic pierce or lifetime.
+		// Robust Target Validation
+		if m.TargetEnemy != nil {
+			isTargetStillInGame := false
+			for _, gameEnemy := range g.enemies {
+				if m.TargetEnemy == gameEnemy { // Pointer comparison
+					isTargetStillInGame = true
+					if gameEnemy.Health <= 0 { // Target is in game list but dead
+						m.TargetEnemy = nil
+					}
+					break
+				}
+			}
+			if !isTargetStillInGame { // Target pointer no longer in the main enemies list
+				m.TargetEnemy = nil
+			}
 		}
-		// Note: if m.TargetEnemy was nil initially (e.g. directional shot), it remains nil.
+		// At this point, m.TargetEnemy is either nil or points to an enemy in g.enemies with Health > 0 (implicitly, because dead ones would have been nilled above)
 
 		// Homing and Weaving Movement
 		var dirToTargetX, dirToTargetY float64
-		if m.TargetEnemy != nil { // Only home if there's a live target
-			targetX, targetY := m.TargetEnemy.X, m.TargetEnemy.Y
+		if m.TargetEnemy != nil { // This check should now be very safe
+			targetX, targetY := m.TargetEnemy.X, m.TargetEnemy.Y // Line 886 (or near)
 			dirToTargetX, dirToTargetY = normalizeVector(targetX-m.X, targetY-m.Y)
 			m.CurrentAngle = math.Atan2(dirToTargetY, dirToTargetX) // Update angle towards target
 		} else {
