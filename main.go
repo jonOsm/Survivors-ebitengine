@@ -34,6 +34,15 @@ var (
 	obstacleImage    *ebiten.Image // Image for obstacles
 	xpOrbImage       *ebiten.Image // Image for XP orbs
 	magicMissileImage *ebiten.Image // Image for magic missiles
+	bruteEnemyImage  *ebiten.Image // Image for Brute enemies
+)
+
+// EnemyTypeID defines the type of an enemy.
+type EnemyTypeID int
+
+const (
+	EnemyTypeStandard EnemyTypeID = iota
+	EnemyTypeBrute
 )
 
 // GameState defines the current state of the game.
@@ -114,6 +123,7 @@ type Game struct {
 	currentPowerUpChoices    [2]*PowerUpDefinition
 	showDevInterface         bool   // Toggled by F2
 	levelUpSelectionInputMode string // "keyboard" or "mouse"
+	waveCounter              int    // Tracks number of waves spawned
 }
 
 // XPOrb represents an experience point orb dropped by enemies.
@@ -165,15 +175,23 @@ type Enemy struct {
 	Health int
 	Image *ebiten.Image
 	CollisionRadius float64
+	Type            EnemyTypeID
 }
 
 const (
 	playerCollisionRadius = 8 // Half of player image size
-	enemyCollisionRadius  = 6 // Half of enemy image size
-	enemySpeed            = 70 // Pixels per second (reduced from 100)
-	enemyHealth           = 1   // Initial health, can be increased for difficulty
-	defaultEnemySpawnRate = 3.0 // Seconds
+	// Standard Enemy Stats (used as base)
+	enemyCollisionRadius  = 6
+	enemySpeed            = 70
+	enemyHealth           = 1
+	defaultEnemySpawnRate = 3.0
 	defaultEnemiesPerWave = 5
+
+	// Brute Enemy Modifiers & Stats
+	bruteSpeedFactor      = 0.75 // Brute speed = enemySpeed * bruteSpeedFactor
+	bruteHealthFactor     = 10   // Brute health = enemyHealth * bruteHealthFactor
+	// Brute size is 4x standard (12px -> 48px). Collision radius also scales.
+	bruteCollisionRadius  = enemyCollisionRadius * 4
 )
 
 // PulseAttack represents an expanding attack.
@@ -234,10 +252,10 @@ func init() {
 	xpOrbImage.Fill(color.RGBA{B: 255, A: 255}) // Blue
 
 	magicMissileImage = ebiten.NewImage(8, 8)
-	// Simple pointed shape (approximate triangle pointing right)
-	// For a real game, use a proper sprite.
-	// This will be a small square for now, rotation will make it look more dynamic.
 	magicMissileImage.Fill(color.RGBA{R: 0, G: 255, B: 255, A: 255}) // Cyan
+
+	bruteEnemyImage = ebiten.NewImage(48, 48) // 4x standard enemy size (12*4 = 48)
+	bruteEnemyImage.Fill(color.RGBA{R: 150, G: 0, B: 0, A: 255}) // Dark Red
 
 	rand.Seed(time.Now().UnixNano())
 }
@@ -285,6 +303,7 @@ func NewGame() *Game {
 		showDevInterface:         false,
 		levelUpSelectionInputMode: "keyboard", // Default to keyboard, or set in prepareLevelUpChoices
 		magicMissiles:            []*MagicMissile{},
+		waveCounter:              0,
 	}
 	// Initialize camera to center on player
 	g.camX = g.player.X - screenWidth/2
@@ -295,6 +314,37 @@ func NewGame() *Game {
 	g.initObstacles()
 	return g
 }
+
+// NewEnemy creates and returns a new enemy of the specified type at the given coordinates.
+func NewEnemy(eType EnemyTypeID, x, y float64) *Enemy {
+	enemy := &Enemy{
+		X:    x,
+		Y:    y,
+		Type: eType,
+	}
+
+	switch eType {
+	case EnemyTypeStandard:
+		enemy.Speed = enemySpeed
+		enemy.Health = enemyHealth
+		enemy.Image = enemyImage
+		enemy.CollisionRadius = enemyCollisionRadius
+	case EnemyTypeBrute:
+		enemy.Speed = enemySpeed * bruteSpeedFactor
+		enemy.Health = enemyHealth * bruteHealthFactor
+		enemy.Image = bruteEnemyImage
+		enemy.CollisionRadius = bruteCollisionRadius
+	default:
+		// Default to standard if type is unknown, though this shouldn't happen with defined types
+		enemy.Speed = enemySpeed
+		enemy.Health = enemyHealth
+		enemy.Image = enemyImage
+		enemy.CollisionRadius = enemyCollisionRadius
+		log.Printf("Warning: Unknown enemy type %d created, defaulting to standard.", eType)
+	}
+	return enemy
+}
+
 
 func (g *Game) initObstacles() {
 	// For now, a few hardcoded obstacles.
@@ -352,6 +402,7 @@ func (g *Game) reset() {
 	// Reset wave progression if it was dynamic (using defaults here)
 	g.enemySpawnRate = defaultEnemySpawnRate
 	g.enemiesPerWave = defaultEnemiesPerWave
+	g.waveCounter = 0
 }
 
 // Update proceeds the game state.
@@ -538,51 +589,55 @@ func (g *Game) updateGameplayScreen() {
 	g.spawnTimer += 1.0 / float64(ebiten.TPS())
 	if g.spawnTimer >= g.enemySpawnRate {
 		g.spawnTimer = 0 // Reset spawn timer
+		g.waveCounter++   // Increment wave counter
+
 		// Example: Increase difficulty over time (optional)
 		// if g.enemiesPerWave < 20 { g.enemiesPerWave++ }
 		// if g.enemySpawnRate > 1.0 { g.enemySpawnRate *= 0.99 }
 
+		const spawnMargin = 50 // Defines how far off-screen from current view enemies will spawn.
 
-		for i := 0; i < g.enemiesPerWave; i++ {
-			// Spawn enemies randomly off-screen from one of the four sides.
-			const spawnMargin = 50 // Defines how far off-screen from current view enemies will spawn.
-			var ex, ey float64
-
-			// Determine spawn position relative to camera view
-			side := rand.Intn(4) // 0: top, 1: bottom, 2: left, 3: right
+		if g.waveCounter%3 == 0 { // Brute wave
+			// Spawn 1 Brute
+			var bx, by float64
+			side := rand.Intn(4)
 			switch side {
-			case 0: // Top, relative to camera view
-				ex = g.camX + rand.Float64()*screenWidth
-				ey = g.camY - spawnMargin
-			case 1: // Bottom, relative to camera view
-				ex = g.camX + rand.Float64()*screenWidth
-				ey = g.camY + screenHeight + spawnMargin
-			case 2: // Left, relative to camera view
-				ex = g.camX - spawnMargin
-				ey = g.camY + rand.Float64()*screenHeight
-			case 3: // Right, relative to camera view
-				ex = g.camX + screenWidth + spawnMargin
-				ey = g.camY + rand.Float64()*screenHeight
+			case 0:
+				bx = g.camX + rand.Float64()*screenWidth; by = g.camY - spawnMargin
+			case 1:
+				bx = g.camX + rand.Float64()*screenWidth; by = g.camY + screenHeight + spawnMargin
+			case 2:
+				bx = g.camX - spawnMargin; by = g.camY + rand.Float64()*screenHeight
+			case 3:
+				bx = g.camX + screenWidth + spawnMargin; by = g.camY + rand.Float64()*screenHeight
 			}
+			// Clamp spawn position, using brute's collision radius
+			bx = clamp(bx, bruteCollisionRadius, worldWidth-bruteCollisionRadius)
+			by = clamp(by, bruteCollisionRadius, worldHeight-bruteCollisionRadius)
 
-			// Clamp spawn position to world boundaries
-			// Enemy's X,Y is center, so consider its collision radius for clamping to world edge.
-			ex = clamp(ex, enemyCollisionRadius, worldWidth-enemyCollisionRadius)
-			ey = clamp(ey, enemyCollisionRadius, worldHeight-enemyCollisionRadius)
+			brute := NewEnemy(EnemyTypeBrute, bx, by)
+			g.enemies = append(g.enemies, brute)
+		} else { // Standard wave
+			for i := 0; i < g.enemiesPerWave; i++ {
+				var ex, ey float64
+				side := rand.Intn(4)
+				switch side {
+				case 0:
+					ex = g.camX + rand.Float64()*screenWidth; ey = g.camY - spawnMargin
+				case 1:
+					ex = g.camX + rand.Float64()*screenWidth; ey = g.camY + screenHeight + spawnMargin
+				case 2:
+					ex = g.camX - spawnMargin; ey = g.camY + rand.Float64()*screenHeight
+				case 3:
+					ex = g.camX + screenWidth + spawnMargin; ey = g.camY + rand.Float64()*screenHeight
+				}
+				// Clamp spawn position, using standard enemy collision radius
+				ex = clamp(ex, enemyCollisionRadius, worldWidth-enemyCollisionRadius)
+				ey = clamp(ey, enemyCollisionRadius, worldHeight-enemyCollisionRadius)
 
-			// Additional check: if after clamping, the enemy is now on-screen due to camera being at edge,
-			// try to push it further. This is a bit tricky. For now, the clamping might suffice if spawnMargin is large enough.
-			// A more robust solution would be to pick a point on a wider perimeter around the camera.
-
-			newEnemy := &Enemy{
-				X:     ex,
-				Y:     ey,
-				Speed: enemySpeed,
-				Health: enemyHealth,
-				Image: enemyImage,
-				CollisionRadius: enemyCollisionRadius,
+				standardEnemy := NewEnemy(EnemyTypeStandard, ex, ey)
+				g.enemies = append(g.enemies, standardEnemy)
 			}
-			g.enemies = append(g.enemies, newEnemy)
 		}
 	}
 
