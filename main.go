@@ -870,26 +870,24 @@ func (g *Game) updateGameplayScreen() {
 			continue
 		}
 
-		// Robust Target Validation: Ensure m.TargetEnemy is valid before any use.
+		// Ultra-Defensive Target Validation for Magic Missiles
 		if m.TargetEnemy != nil {
-			foundAndAlive := false
-			for _, e := range g.enemies { // Check against the current live enemy list
-				if e == m.TargetEnemy { // Pointer comparison
-					if e.Health > 0 {
-						foundAndAlive = true
+			var validatedTargetThisFrame *Enemy = nil
+			for _, gameEnemy := range g.enemies {
+				if gameEnemy == m.TargetEnemy { // Pointer comparison: is it the same instance?
+					if gameEnemy.Health > 0 { // Is it still alive in the authoritative list?
+						validatedTargetThisFrame = gameEnemy // Yes, use this "live" pointer
 					}
-					break
+					break // Found our target in the live list, its status is determined.
 				}
 			}
-			if !foundAndAlive {
-				m.TargetEnemy = nil // Target is gone or dead
-			}
+			m.TargetEnemy = validatedTargetThisFrame // Update missile's target to the live one, or nil if not found/dead.
 		}
-		// Now, m.TargetEnemy is either nil or points to a live enemy in g.enemies.
+		// Now, m.TargetEnemy is either nil, or it's a pointer to an enemy confirmed to be in g.enemies and have Health > 0.
 
 		// Homing and Weaving Movement
 		var dirToTargetX, dirToTargetY float64
-		if m.TargetEnemy != nil { // This check should now be very safe
+		if m.TargetEnemy != nil { // This check is now against the re-validated m.TargetEnemy
 			targetX, targetY := m.TargetEnemy.X, m.TargetEnemy.Y
 			dirToTargetX, dirToTargetY = normalizeVector(targetX-m.X, targetY-m.Y)
 			m.CurrentAngle = math.Atan2(dirToTargetY, dirToTargetX) // Update angle towards target
